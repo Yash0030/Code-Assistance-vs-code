@@ -13,6 +13,8 @@ const newChatBtn       = /** @type {HTMLButtonElement}  */ (document.getElementB
 const modelSelect      = /** @type {HTMLSelectElement}  */ (document.getElementById('model-select'));
 const statusDot        = /** @type {HTMLSpanElement}    */ (document.getElementById('status-dot'));
 const statusText       = /** @type {HTMLSpanElement}    */ (document.getElementById('status-text'));
+const agentStatus      = /** @type {HTMLDivElement}     */ (document.getElementById('agent-status'));
+const agentStatusText  = /** @type {HTMLSpanElement}    */ (document.getElementById('agent-status-text'));
 const scrollBtn        = /** @type {HTMLButtonElement}  */ (document.getElementById('scroll-btn'));
 const contextBar       = /** @type {HTMLDivElement}     */ (document.getElementById('context-bar'));
 const historyBtn       = /** @type {HTMLButtonElement}  */ (document.getElementById('history-btn'));
@@ -513,7 +515,7 @@ function startAssistantMessage() {
     div.className = 'message assistant';
     div.innerHTML =
         `<div class="msg-header">` +
-            `<span class="msg-role">Agent <span class="dots"><span></span><span></span><span></span></span></span>` +
+            `<span class="msg-role">✦ Agent <span class="dots"><span></span><span></span><span></span></span></span>` +
             `<time class="msg-time">${getTimeStr()}</time>` +
         `</div>` +
         `<div class="msg-content"></div>`;
@@ -585,8 +587,34 @@ function removeLastAssistantMsg() {
  * @param {Record<string, unknown>} args
  */
 function addToolCard(id, name, args) {
+    const target = args.path || args.command || args.pattern || args.query;
+    const activity = {
+        workspace_summary: 'Exploring the workspace',
+        system_info: 'Checking the environment',
+        read_file: target ? `Reading ${target}` : 'Reading a file',
+        list_files: target ? `Listing ${target}` : 'Listing workspace files',
+        find_files: target ? `Finding ${target}` : 'Finding workspace files',
+        search_files: target ? `Searching for ${target}` : 'Searching workspace files',
+        create_file: target ? `Creating ${target}` : 'Creating a file',
+        create_folder: target ? `Creating folder ${target}` : 'Creating a folder',
+        edit_file: target ? `Editing ${target}` : 'Editing a file',
+        write_file: target ? `Writing ${target}` : 'Writing a file',
+        append_to_file: target ? `Updating ${target}` : 'Updating a file',
+        rename_file: args.new_path ? `Moving to ${args.new_path}` : 'Renaming a file',
+        copy_file: args.destination ? `Copying to ${args.destination}` : 'Copying a file',
+        delete_file: target ? `Deleting ${target}` : 'Deleting a file',
+        run_command: target ? `Running: ${target}` : 'Running a command',
+        get_diagnostics: 'Checking code diagnostics',
+        memory_list: 'Checking project notes',
+        memory_write: 'Saving a project note',
+        memory_delete: 'Removing a project note',
+    };
+    setAgentStatus(`${activity[name] || `Using ${name.replace(/_/g, ' ')}`}…`);
     const icon = TOOL_ICONS[name] || '🔧';
-    const argsStr = Object.entries(args)
+    const visibleArgs = ['create_file', 'write_file', 'append_to_file', 'edit_file'].includes(name)
+        ? Object.fromEntries(Object.entries(args).filter(([key]) => !['content', 'old_string', 'new_string'].includes(key)))
+        : args;
+    const argsStr = Object.entries(visibleArgs)
         .map(([k, v]) => `${k}=${JSON.stringify(v)}`)
         .join(' ');
     const div = document.createElement('div');
@@ -621,6 +649,7 @@ function updateToolCard(id, success, preview) {
         p.textContent = preview;
         info.appendChild(p);
     }
+    setAgentStatus('Thinking about the next step…');
     scrollBottom();
 }
 
@@ -858,6 +887,12 @@ function setStreaming(on) {
     }
 }
 
+/** @param {string} text */
+function setAgentStatus(text) {
+    agentStatusText.textContent = text;
+    agentStatus.classList.toggle('visible', Boolean(text));
+}
+
 function sendMessage() {
     const text = promptEl.value.trim();
     if (!text || streaming) { return; }
@@ -1040,18 +1075,24 @@ window.addEventListener('message', (event) => {
             break;
 
         case 'agentStart':
+            setAgentStatus('Thinking through your request…');
             setStreaming(true);
             break;
 
         case 'agentEnd':
+            setAgentStatus('');
             setStreaming(false);
             break;
 
         case 'streamStart':
+            setAgentStatus('Planning the next step…');
             startAssistantMessage();
             break;
 
         case 'token':
+            if (agentStatusText.textContent === 'Planning the next step…') {
+                setAgentStatus('Working on your request…');
+            }
             appendToken(msg.text);
             break;
 
@@ -1081,6 +1122,7 @@ window.addEventListener('message', (event) => {
             break;
 
         case 'commandStart':
+            setAgentStatus(msg.cmd ? `Running: ${msg.cmd}` : 'Running command…');
             addCommandBlock(msg.id, msg.cmd);
             break;
 
@@ -1090,6 +1132,7 @@ window.addEventListener('message', (event) => {
 
         case 'commandEnd':
             finalizeCommandBlock(msg.id, msg.exitCode);
+            setAgentStatus('Thinking about the command result…');
             break;
 
         case 'fileChanged':

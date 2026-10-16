@@ -62,6 +62,7 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
     private currentSession: ChatSession;
     /** Cached workspace file index for @mention autocomplete. Rebuilt on new workspace. */
     private _fileIndex: ReturnType<typeof indexWorkspaceFiles> = [];
+    private _fileIndexRoot = '';
 
     constructor(private readonly context: vscode.ExtensionContext) {
         this.storage = new ChatStorage(context);
@@ -75,13 +76,16 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
     async resolveWebviewView(webviewView: vscode.WebviewView): Promise<void> {
         this._view = webviewView;
 
-        const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
+        const workspaceRoot = this.getWorkspaceRoot();
         this._agent = new Agent(workspaceRoot, this.memory);
 
         // Build file index for @mention autocomplete (async, non-blocking)
         if (workspaceRoot) {
             setTimeout(() => {
-                try { this._fileIndex = indexWorkspaceFiles(workspaceRoot); }
+                try {
+                    this._fileIndex = indexWorkspaceFiles(workspaceRoot);
+                    this._fileIndexRoot = workspaceRoot;
+                }
                 catch { /* best-effort */ }
             }, 500);
         }
@@ -112,6 +116,9 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
                     const text  = raw.text?.trim() ?? '';
                     const model = raw.model ?? getConfig().model;
                     if (!text) { break; }
+                    const workspaceRoot = this.getWorkspaceRoot();
+                    this._agent?.setWorkspaceRoot(workspaceRoot);
+                    this.refreshFileIndex(workspaceRoot);
 
                     logInfo(`[user] ${text.slice(0, 120)}${text.length > 120 ? '…' : ''}`);
 
@@ -170,6 +177,7 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
                 // ── Retry last ────────────────────────────────────────────
                 case 'retryLast': {
                     const model   = raw.model ?? getConfig().model;
+                    this._agent?.setWorkspaceRoot(this.getWorkspaceRoot());
                     const lastMsg = this._agent!.retryLast();
                     if (!lastMsg) { break; }
                     // Remove the last assistant + error messages from session
@@ -299,13 +307,24 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
     private startNewSession(opts: { model?: string }): void {
         const model = opts.model ?? getConfig().model;
         this.currentSession = this.storage.createNew(model);
-        const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
+        const root = this.getWorkspaceRoot();
         this._agent = new Agent(root, this.memory);
         // Re-index files for the new session (workspace may have changed)
         if (root && !this._fileIndex.length) {
             try { this._fileIndex = indexWorkspaceFiles(root); } catch { /* best-effort */ }
         }
         logInfo(`[provider] New session: ${this.currentSession.id}`);
+    }
+
+    private getWorkspaceRoot(): string {
+        return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
+    }
+
+    private refreshFileIndex(root: string): void {
+        if (root === this._fileIndexRoot) { return; }
+        this._fileIndexRoot = root;
+        this._fileIndex = root ? indexWorkspaceFiles(root) : [];
+        logInfo(`[provider] File index refreshed for workspace: ${root || '(none)'}`);
     }
 
     private appendToSession(msg: StoredMessage): void {

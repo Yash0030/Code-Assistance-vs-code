@@ -22,6 +22,7 @@ const MAX_TOOL_RESULT_CHARS = 15_000;
  * in ollamaClient.ts (e.g. 16384+) or the model will silently forget the tools/system prompt.
  */
 const MAX_HISTORY_CHARS = 60_000;
+const MAX_WORKSPACE_CONTEXT_CHARS = 12_000;
 const READ_MAX_BYTES = 5 * 1024 * 1024;
 const READ_MAX_CHARS = 60_000;
 const SEARCH_MAX_RESULTS = 60;
@@ -446,6 +447,10 @@ export class Agent {
         private readonly memory: ProjectMemory | null = null
     ) {}
 
+    setWorkspaceRoot(root: string): void {
+        this.workspaceRoot = root;
+    }
+
     get historyLength(): number { return this.history.length; }
 
     reset(): void {
@@ -520,6 +525,7 @@ export class Agent {
         const baseSystemContent = customSystemPrompt
             ? `${customSystemPrompt}${REQUIRED_TOOL_PROMPT}`
             : DEFAULT_SYSTEM_PROMPT;
+        const workspaceContext = this.buildWorkspaceContext();
 
         const callCounts = new Map<string, number>();
         let finished = false;
@@ -530,6 +536,7 @@ export class Agent {
 
             const isTextMode = this.toolMode === 'text';
             const systemContent = baseSystemContent + '\n\n' + this.buildEnvironment()
+                + '\n\n' + workspaceContext
                 + (isTextMode ? TEXT_MODE_TOOL_INSTRUCTIONS : '');
             const tools = isTextMode ? [] : TOOL_DEFINITIONS;
 
@@ -565,13 +572,26 @@ export class Agent {
 
             post({ type: 'streamEnd' });
 
+            // A stopped stream can still resolve with partial content. Never execute
+            // tool calls parsed from that incomplete response.
+            if (this.stopRef.stop) {
+                finished = true;
+                break;
+            }
+
             // ── Extract tool calls depending on mode ──────────────────────────
             let toolCalls: OllamaToolCall[];
             let displayContent: string;
 
             if (isTextMode) {
-                toolCalls = parseTextToolCalls(result.content);
-                displayContent = stripToolBlocks(result.content);
+                const textToolCalls = parseTextToolCalls(result.content);
+                const withoutToolBlocks = stripToolBlocks(result.content);
+                const parsedJson = parseJsonToolCall(withoutToolBlocks);
+                toolCalls = [...textToolCalls, ...parsedJson.calls];
+                displayContent = parsedJson.remaining;
+                if (parsedJson.calls.length) {
+                    logInfo(`Text-mode JSON tool-call fallback — ${parsedJson.calls.map((c) => c.function.name).join(', ')}`);
+                }
             } else {
                 toolCalls = result.toolCalls ?? [];
                 displayContent = result.content;
@@ -775,6 +795,38 @@ export class Agent {
             '═══════════════════',
         ];
         return lines.join('\n');
+    }
+
+    private buildWorkspaceContext(): string {
+        if (!this.workspaceRoot) {
+            return [
+                '═══ OPEN WORKSPACE ═══',
+                'No VS Code workspace folder is open. Do not assume a project or invent paths.',
+                'Ask the user to open the intended project folder, or use system_info to clarify the environment.',
+                '══════════════════════',
+            ].join('\n');
+        }
+
+        let summary: string;
+        try {
+            summary = buildWorkspaceSummary(this.workspaceRoot);
+        } catch (err) {
+            const message = (err as Error).message;
+            logError(`Could not summarize workspace: ${message}`);
+            summary = `Workspace summary unavailable: ${message}`;
+        }
+        if (summary.length > MAX_WORKSPACE_CONTEXT_CHARS) {
+            summary = `${summary.slice(0, MAX_WORKSPACE_CONTEXT_CHARS)}\n…[workspace context truncated]`;
+        }
+
+        return [
+            '═══ CURRENT VS CODE WORKSPACE — authoritative project context ═══',
+            `Absolute root: ${this.workspaceRoot}`,
+            'Relative file paths in your tools resolve from this root. Work in this project; do not invent other project paths.',
+            'Use the file tree and key-file summary below to understand what exists. Read relevant files before editing; if a requested file is absent, create it in this workspace.',
+            summary,
+            '══════════════════════════════════════════════════════════════════',
+        ].join('\n');
     }
 
     private resolvePath(input: string): string {

@@ -25,17 +25,15 @@
       flex-shrink: 0;
       display: flex;
       align-items: center;
-      gap: 6px;
-      padding: 0 10px;
-      height: 36px;
+      gap: 8px;
+      padding: 0 12px;
+      height: 42px;
       border-bottom: 1px solid var(--vscode-sideBarSectionHeader-border, var(--vscode-panel-border, #333));
       background: var(--vscode-sideBarSectionHeader-background, rgba(0,0,0,0.12));
     }
     .header-title {
-      font-size: 11px;
-      font-weight: 600;
-      text-transform: uppercase;
-      letter-spacing: 0.6px;
+      font-size: 12px;
+      font-weight: 650;
       color: var(--vscode-sideBarSectionHeader-foreground, #bbb);
       flex: 1;
       white-space: nowrap;
@@ -52,6 +50,7 @@
       max-width: 130px;
       cursor: pointer;
       outline: none;
+      min-width: 0;
     }
     #model-select:focus { border-color: var(--vscode-focusBorder, #0078d4); }
     .header-btn {
@@ -79,7 +78,8 @@
       overflow-y: auto;
       display: flex;
       flex-direction: column;
-      padding: 4px 0 2px;
+      padding: 10px 0 14px;
+      gap: 5px;
       scrollbar-width: thin;
       scrollbar-color: var(--vscode-scrollbarSlider-background, rgba(128,128,128,0.4)) transparent;
       position: relative;
@@ -126,18 +126,36 @@
       text-align: center;
       min-height: 200px;
     }
-    .welcome-icon { font-size: 30px; opacity: 0.55; }
-    .welcome-title { font-size: 15px; font-weight: 600; color: var(--vscode-sideBar-foreground, #ccc); }
-    .welcome-sub { font-size: 12px; line-height: 1.55; opacity: 0.75; max-width: 220px; }
-    .welcome-hints { margin-top: 6px; display: flex; flex-direction: column; gap: 5px; width: 100%; }
+    .welcome-icon {
+      width: 48px;
+      height: 48px;
+      display: grid;
+      place-items: center;
+      border: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.25));
+      border-radius: 16px;
+      background: var(--vscode-editor-background, rgba(0,0,0,0.18));
+      font-size: 24px;
+      margin-bottom: 3px;
+    }
+    .welcome-title { font-size: 17px; font-weight: 650; color: var(--vscode-sideBar-foreground, #ccc); }
+    .welcome-sub { font-size: 12px; line-height: 1.6; opacity: 0.75; max-width: 250px; }
+    .welcome-hints {
+      margin-top: 8px;
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 7px;
+      width: 100%;
+    }
     .hint-chip {
       background: var(--vscode-editor-background, rgba(0,0,0,0.25));
       border: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.25));
-      border-radius: 4px;
-      padding: 5px 10px;
+      border-radius: 8px;
+      padding: 9px 10px;
       font-size: 11px;
       cursor: pointer;
       text-align: left;
+      line-height: 1.4;
+      min-height: 52px;
       color: var(--vscode-descriptionForeground, #888);
       transition: background 0.1s, color 0.1s;
       font-family: inherit;
@@ -149,15 +167,20 @@
     }
 
     /* ── Message bubble ──────────────────────────────────────────────────── */
-    .message { padding: 9px 14px; }
-    .message + .message {
-      border-top: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.12));
-    }
+    .message { padding: 9px 12px; }
     .message.user {
+      align-self: flex-end;
+      max-width: 92%;
+      margin: 3px 12px 3px 24px;
       background: var(--vscode-editor-background, rgba(0,0,0,0.18));
-      border-left: 2px solid var(--vscode-focusBorder, #0078d4);
+      border: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.2));
+      border-radius: 12px 12px 3px 12px;
     }
-    .message.assistant { background: transparent; }
+    .message.assistant {
+      width: 100%;
+      padding: 9px 14px;
+      background: transparent;
+    }
     .message.error-msg  { background: transparent; }
 
     .msg-header {
@@ -177,7 +200,14 @@
       align-items: center;
       gap: 5px;
     }
-    .message.user .msg-role { color: var(--vscode-focusBorder, #0078d4); opacity: 0.85; }
+    .message.user .msg-role {
+      color: var(--vscode-focusBorder, #0078d4);
+      opacity: 0.9;
+      text-transform: none;
+      letter-spacing: 0;
+    }
+    .message.assistant .msg-role { color: var(--vscode-textLink-foreground, #4fc1ff); opacity: 0.9; }
+    .message.error-msg .msg-role { opacity: 0.9; }
     .msg-time {
       font-size: 10px;
       opacity: 0.35;
@@ -285,11 +315,11 @@
       display: flex;
       align-items: flex-start;
       gap: 8px;
-      margin: 3px 14px;
-      padding: 6px 10px;
+      margin: 3px 12px;
+      padding: 8px 10px;
       background: var(--vscode-editor-background, rgba(0,0,0,0.18));
       border: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.25));
-      border-radius: 5px;
+      border-radius: 8px;
       font-size: 11px;
       border-left: 3px solid #e5c07b;
     }
@@ -377,19 +407,22 @@
       flex-shrink: 0;
       border-top: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.2));
       background: var(--vscode-sideBar-background, #1e1e1e);
-      padding: 7px 10px 8px;
+      padding: 9px 10px max(9px, env(safe-area-inset-bottom));
     }
     #input-box {
       background: var(--vscode-input-background, #3c3c3c);
-      border: 1px solid var(--vscode-input-border, transparent);
-      border-radius: 6px;
-      padding: 7px 10px;
+      border: 1px solid var(--vscode-input-border, rgba(128,128,128,0.25));
+      border-radius: 12px;
+      padding: 9px 10px;
       display: flex;
       align-items: flex-end;
       gap: 6px;
       transition: border-color 0.15s;
     }
-    #input-box:focus-within { border-color: var(--vscode-focusBorder, #0078d4); }
+    #input-box:focus-within {
+      border-color: var(--vscode-focusBorder, #0078d4);
+      box-shadow: 0 0 0 1px color-mix(in srgb, var(--vscode-focusBorder, #0078d4) 22%, transparent);
+    }
     #prompt {
       flex: 1;
       background: transparent;
@@ -400,7 +433,7 @@
       font-size: 13px;
       resize: none;
       min-height: 20px;
-      max-height: 140px;
+      max-height: 180px;
       line-height: 1.45;
       overflow-y: auto;
     }
@@ -411,9 +444,9 @@
       background: var(--vscode-button-background, #0e639c);
       color: var(--vscode-button-foreground, #fff);
       border: none;
-      border-radius: 4px;
-      padding: 4px 10px;
-      font-size: 12px;
+      border-radius: 8px;
+      padding: 6px 11px;
+      font-size: 11px;
       cursor: pointer;
       white-space: nowrap;
       font-family: inherit;
@@ -425,7 +458,7 @@
       display: flex;
       align-items: center;
       justify-content: space-between;
-      margin-top: 5px;
+      margin-top: 8px;
     }
     #status-row {
       display: flex; align-items: center; gap: 5px;
@@ -441,13 +474,37 @@
     #status-dot.disconnected { background: #f44747; }
     #status-dot.checking     { background: #e5c07b; }
 
+    #agent-status {
+      display: none;
+      align-items: center;
+      gap: 7px;
+      min-height: 24px;
+      padding: 1px 3px 4px;
+      color: var(--vscode-descriptionForeground, #aaa);
+      font-size: 11px;
+    }
+    #agent-status.visible { display: flex; }
+    #agent-status-dot {
+      width: 7px;
+      height: 7px;
+      flex: 0 0 7px;
+      border-radius: 50%;
+      background: var(--vscode-focusBorder, #0078d4);
+      animation: pulse 1.2s infinite ease-in-out;
+    }
+    #agent-status-text {
+      overflow: hidden;
+      white-space: nowrap;
+      text-overflow: ellipsis;
+    }
+
     #stop-btn {
       font-size: 11px;
       background: none;
       border: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.3));
       color: var(--vscode-descriptionForeground, #888);
-      border-radius: 3px;
-      padding: 2px 7px;
+      border-radius: 6px;
+      padding: 3px 8px;
       cursor: pointer;
       display: none;
       font-family: inherit;
@@ -771,13 +828,13 @@
   <div id="messages">
     <div id="welcome">
       <div class="welcome-icon">🤖</div>
-      <div class="welcome-title">Ollama Agent</div>
-      <div class="welcome-sub">Local AI — powered by Ollama.<br>100% offline, no telemetry.</div>
+      <div class="welcome-title">What are we building?</div>
+      <div class="welcome-sub">Your local coding agent can explore the project, edit files, and run checks right here.</div>
       <div class="welcome-hints">
-        <button class="hint-chip" data-hint="List all files in this project">📁 List project files</button>
-        <button class="hint-chip" data-hint="Explain what this project does based on the code">💡 Explain this project</button>
-        <button class="hint-chip" data-hint="Find any TODO comments in the code">🔍 Find TODOs in code</button>
-        <button class="hint-chip" data-hint="What are the main dependencies of this project?">📦 Summarize dependencies</button>
+        <button class="hint-chip" data-hint="Inspect this project and explain its structure">⌕ Explore this project</button>
+        <button class="hint-chip" data-hint="Find TODO and FIXME comments in the workspace">⌕ Find TODOs</button>
+        <button class="hint-chip" data-hint="Review the current workspace for bugs and suggest concrete fixes">◈ Review my code</button>
+        <button class="hint-chip" data-hint="What are the main dependencies of this project?">▤ Explain dependencies</button>
       </div>
     </div>
     <button id="scroll-btn" title="Scroll to bottom">↓</button>
@@ -788,9 +845,13 @@
     <div id="context-bar"></div>
     <!-- @mention autocomplete dropdown -->
     <div id="mention-dropdown" style="display:none"></div>
+    <div id="agent-status" role="status" aria-live="polite">
+      <span id="agent-status-dot"></span>
+      <span id="agent-status-text"></span>
+    </div>
     <div id="input-box" style="margin-top: 5px;">
-      <textarea id="prompt" rows="1" placeholder="Ask anything… (@ to mention a file, Enter ↵ to send)"></textarea>
-      <button id="send-btn" disabled>Send</button>
+      <textarea id="prompt" rows="1" aria-label="Message the coding agent" placeholder="Ask, plan, or build… (@ to add context)"></textarea>
+      <button id="send-btn" title="Send message (Enter)" aria-label="Send message" disabled>↑</button>
     </div>
     <div id="input-footer">
       <div id="status-row">

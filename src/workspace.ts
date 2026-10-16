@@ -24,7 +24,7 @@ export function buildFileTree(dir: string, maxDepth = 3): string {
         catch { return; }
 
         const visible = entries
-            .filter((e) => !SKIP_DIRS.has(e.name) && !e.name.startsWith('.'))
+            .filter((e) => !SKIP_DIRS.has(e.name) && (!e.isDirectory() || !e.name.startsWith('.')))
             .sort((a, b) => {
                 if (a.isDirectory() !== b.isDirectory()) { return a.isDirectory() ? -1 : 1; }
                 return a.name.localeCompare(b.name);
