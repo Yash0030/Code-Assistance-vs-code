@@ -847,14 +847,23 @@ const FILE_ACTION_ICONS = {
 /**
  * @param {string} filePath
  * @param {string} action
+ * @param {number | undefined} added
+ * @param {number | undefined} removed
  */
-function addFileToast(filePath, action) {
+function addFileToast(filePath, action, added, removed) {
     const div = document.createElement('div');
     const isEdit   = action === 'edited'  || action === 'written' || action === 'appended';
     const isDelete = action === 'deleted';
     div.className = `file-toast${isEdit ? ' edited' : ''}${isDelete ? ' deleted' : ''}`;
     const icon = FILE_ACTION_ICONS[action] ?? '📁';
-    div.innerHTML = `${icon} <span>${escHtml(action.charAt(0).toUpperCase() + action.slice(1))}: <strong>${escHtml(filePath)}</strong></span>`;
+    const hasLineChanges = (Number.isInteger(added) && added !== 0) || (Number.isInteger(removed) && removed !== 0);
+    const lineStats = hasLineChanges
+        ? `<span class="file-diff-stats" aria-label="${Number(added) || 0} lines added, ${Number(removed) || 0} lines removed">` +
+            `<span class="file-diff-added">+${Number(added) || 0}</span>` +
+            `<span class="file-diff-removed">−${Number(removed) || 0}</span>` +
+          `</span>`
+        : '';
+    div.innerHTML = `${icon} <span class="file-toast-label">${escHtml(action.charAt(0).toUpperCase() + action.slice(1))}: <strong>${escHtml(filePath)}</strong></span>${lineStats}`;
     messagesEl.insertBefore(div, scrollBtn);
     scrollBottom();
 }
@@ -1084,6 +1093,10 @@ window.addEventListener('message', (event) => {
             setStreaming(false);
             break;
 
+        case 'agentActivity':
+            setAgentStatus(msg.text ?? 'Working…');
+            break;
+
         case 'streamStart':
             setAgentStatus('Planning the next step…');
             startAssistantMessage();
@@ -1136,7 +1149,7 @@ window.addEventListener('message', (event) => {
             break;
 
         case 'fileChanged':
-            addFileToast(msg.path, msg.action);
+            addFileToast(msg.path, msg.action, msg.added, msg.removed);
             break;
 
         case 'modeSwitch':

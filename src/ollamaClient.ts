@@ -93,7 +93,9 @@ export function streamChatRequest(
     messages: OllamaMessage[],
     tools: unknown[],
     onToken: (t: string) => void,
-    stopRef: { stop: boolean }
+    stopRef: { stop: boolean },
+    stopWhenToolReady?: (content: string, toolCalls: OllamaToolCall[]) => boolean,
+    format?: unknown
 ): Promise<StreamResult> {
     return new Promise((resolve, reject) => {
         const { hostname, port } = getEndpoint();
@@ -111,6 +113,7 @@ export function streamChatRequest(
         };
         // Only include tools if non-empty (some models reject the field when empty)
         if (tools.length) { payload.tools = tools; }
+        if (format) { payload.format = format; }
 
         const body = JSON.stringify(payload);
         logInfo(`POST /api/chat  model=${model}  msgs=${messages.length}  num_ctx=${numCtx}`);
@@ -173,6 +176,12 @@ export function streamChatRequest(
                     if (p.message?.tool_calls?.length) {
                         // Append (don't overwrite): some models stream one call per chunk
                         toolCalls.push(...p.message.tool_calls);
+                    }
+                    if (!p.done && stopWhenToolReady?.(fullContent, toolCalls)) {
+                        logInfo(`Stopping model stream early — ${toolCalls.length ? 'native tool call ready' : 'text tool call ready'}`);
+                        succeed();
+                        req.destroy();
+                        return;
                     }
                     if (p.done) {
                         logInfo(`Stream done — ${fullContent.length} chars, ${toolCalls.length} tool calls`);

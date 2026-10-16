@@ -34,7 +34,7 @@ const BINARY_EXTS = new Set([
 
 /**
  * Walk the workspace and build a flat list of all (non-binary-ish) file paths.
- * Respects SKIP_DIRS and ignores dot-files.
+ * Respects SKIP_DIRS and includes dot-files such as environment templates.
  */
 export function indexWorkspaceFiles(root: string): FileMention[] {
     const results: FileMention[] = [];
@@ -43,7 +43,7 @@ export function indexWorkspaceFiles(root: string): FileMention[] {
         if (results.length >= MAX_INDEX) { return; }
         try {
             for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
-                if (SKIP_DIRS.has(e.name) || e.name.startsWith('.')) { continue; }
+                if (SKIP_DIRS.has(e.name) || (e.isDirectory() && e.name.startsWith('.'))) { continue; }
                 const full = path.join(dir, e.name);
                 if (e.isDirectory()) { walk(full); continue; }
                 const ext = path.extname(e.name).slice(1).toLowerCase();

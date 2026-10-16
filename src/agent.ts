@@ -32,6 +32,58 @@ const FIND_MAX_RESULTS = 200;
 const COMMAND_RESULT_LIMIT = 12_000;
 const COMMAND_DEFAULT_TIMEOUT_S = 60;
 const COMMAND_MAX_TIMEOUT_S = 600;
+const LINE_DIFF_MAX_CELLS = 1_000_000;
+
+function splitLines(content: string): string[] {
+    if (!content) { return []; }
+    const lines = content.split(/\r\n|\n|\r/);
+    if (lines[lines.length - 1] === '') { lines.pop(); }
+    return lines;
+}
+
+function countLineChanges(before: string, after: string): { added: number; removed: number } {
+    const oldLines = splitLines(before);
+    const newLines = splitLines(after);
+    let prefix = 0;
+    while (prefix < oldLines.length && prefix < newLines.length && oldLines[prefix] === newLines[prefix]) {
+        prefix++;
+    }
+
+    let oldEnd = oldLines.length;
+    let newEnd = newLines.length;
+    while (oldEnd > prefix && newEnd > prefix && oldLines[oldEnd - 1] === newLines[newEnd - 1]) {
+        oldEnd--;
+        newEnd--;
+    }
+
+    const oldMiddle = oldLines.slice(prefix, oldEnd);
+    const newMiddle = newLines.slice(prefix, newEnd);
+    if (!oldMiddle.length || !newMiddle.length) {
+        return { added: newMiddle.length, removed: oldMiddle.length };
+    }
+
+    if (oldMiddle.length * newMiddle.length > LINE_DIFF_MAX_CELLS) {
+        return { added: newMiddle.length, removed: oldMiddle.length };
+    }
+
+    const rows = oldMiddle.length <= newMiddle.length ? oldMiddle : newMiddle;
+    const columns = oldMiddle.length <= newMiddle.length ? newMiddle : oldMiddle;
+    const lcs = new Uint32Array(rows.length + 1);
+    for (const row of columns) {
+        let diagonal = 0;
+        for (let i = 1; i <= rows.length; i++) {
+            const previous = lcs[i];
+            lcs[i] = row === rows[i - 1] ? diagonal + 1 : Math.max(lcs[i], lcs[i - 1]);
+            diagonal = previous;
+        }
+    }
+
+    const unchanged = lcs[rows.length];
+    return {
+        added: newMiddle.length - unchanged,
+        removed: oldMiddle.length - unchanged,
+    };
+}
 
 // ── Tool definitions ──────────────────────────────────────────────────────────
 
@@ -54,9 +106,8 @@ function tool(
 }
 
 const PATH_HELP =
-    'Absolute path anywhere on this computer (e.g. C:\\Users\\me\\Desktop\\x.txt or /home/me/x.txt), ' +
-    '"~/..." for the home folder, "Desktop/...", "Documents/...", "Downloads/..." for those user folders, ' +
-    'or a path relative to the workspace root.';
+    'A path relative to the currently open VS Code workspace (preferred; e.g. "src/file.ts" or "./ysh.txt"), ' +
+    'or an absolute path / path beginning with "~/..." for a location outside the workspace.';
 
 export const TOOL_DEFINITIONS = [
     tool(
@@ -69,7 +120,7 @@ export const TOOL_DEFINITIONS = [
     ),
     tool(
         'read_file',
-        'Read a text file (anywhere on the computer). Optionally read only a line range for large files.',
+        'Read a text file in the current workspace, or an absolute/~/ path if the user requested an external file. Optionally read only a line range for large files.',
         {
             path: { type: 'string', description: PATH_HELP },
             start_line: { type: 'number', description: 'First line to read (1-based, optional)' },
@@ -104,7 +155,7 @@ export const TOOL_DEFINITIONS = [
     ),
     tool(
         'create_file',
-        'Create a new file with the given content (parent folders are created automatically). Fails if the file already exists. Works anywhere on the computer.',
+        'Create a new file in the current workspace with the given content (parent folders are created automatically). Fails if the file already exists. Use an absolute/~/ path only when the user requested an external location.',
         {
             path: { type: 'string', description: PATH_HELP },
             content: { type: 'string', description: 'File content' },
@@ -113,7 +164,7 @@ export const TOOL_DEFINITIONS = [
     ),
     tool(
         'create_folder',
-        'Create a folder (and any missing parents) anywhere on the computer, e.g. "Desktop/hbd" or "C:\\Projects\\app".',
+        'Create a folder (and any missing parents) in the current workspace. Use an absolute/~/ path only when the user requested an external location.',
         { path: { type: 'string', description: PATH_HELP } },
         ['path']
     ),
@@ -130,7 +181,7 @@ export const TOOL_DEFINITIONS = [
     ),
     tool(
         'write_file',
-        'Write a complete file (creates it, or overwrites if it exists). Prefer edit_file for small changes.',
+        'Write a complete file in the current workspace (creates it, or overwrites if it exists). Prefer edit_file for small changes.',
         {
             path: { type: 'string', description: PATH_HELP },
             content: { type: 'string', description: 'Full file content' },
@@ -204,7 +255,7 @@ export const TOOL_DEFINITIONS = [
 ];
 
 const DEFAULT_SYSTEM_PROMPT = `You are an expert autonomous AI coding assistant running inside VS Code, similar to GitHub Copilot agent mode and Claude Code.
-You can read, create, edit, copy, move and delete files and folders ANYWHERE on the user's computer (not only inside the workspace), and run shell commands.
+You can read, create, edit, copy, move and delete files and folders in the current workspace, and run shell commands. Absolute paths can target other locations when the user explicitly asks.
 
 Tools:
   system_info        — OS, shell, home/Desktop/Documents/Downloads paths
@@ -218,7 +269,9 @@ Tools:
   memory_list / memory_write / memory_delete — persistent project notes
 
 How to work:
-- You have real tools. When the user asks for something to be done, DO it with the tools instead of describing how. Never claim you cannot access the user's files or Desktop; use an absolute path or Desktop/..., Documents/..., ~/... .
+- You have real tools. When the user asks for something to be done, DO it with the tools instead of describing how. Never claim you cannot access the user's files.
+- Do not narrate a plan before acting. Use tools immediately; progress is shown by the tool activity UI. Only provide a concise summary after the work is done.
+- For relative file paths, use the current workspace root. Use an absolute path or "~/..." only if the user explicitly requests a location outside the workspace.
 - For implementation requests, start by inspecting the relevant files and then use file tools to make the requested changes. A plan, code snippet, or promise to edit is not a completed task.
 - Use multiple tool calls when useful. After each tool result, continue until the requested work is actually complete and verified.
 - The editor itself asks the user for approval on risky actions, so do not ask for permission in chat — just call the tool.
@@ -237,6 +290,7 @@ How to work:
 const REQUIRED_TOOL_PROMPT = `
 
 Tool-use requirements:
+- Do not narrate a plan before acting. Use available tools immediately; the interface shows progress.
 - For implementation requests, inspect and change the actual workspace files using the available tools; a plan or code in chat is not a completed implementation.
 - Continue calling tools after each result until the requested change is complete and verified.
 - Do not claim that a file was changed unless a file tool confirms it.`;
@@ -251,9 +305,10 @@ You can call tools by outputting a tool call block in EXACTLY this format — no
 <tool>{"name": "TOOL_NAME", "arguments": {JSON_ARGS}}</tool>
 
 IMPORTANT:
-- Output one or more complete <tool>...</tool> blocks when calling tools, with no explanatory text mixed into the blocks.
+- Output one or more complete <tool>...</tool> blocks when calling tools, with no explanatory text, plans, code fences, or shell snippets mixed into the blocks.
 - After receiving tool results, continue the task (call more tools or give the final answer).
 - You may group independent tool calls together. Do not claim work is complete until the tool results confirm it.
+- Never print a tool request as plain JSON or include example tool-call JSON in a plan. Make actual tool calls using the required format.
 
 Tools and their argument schemas:
   system_info         — {}
@@ -263,7 +318,7 @@ Tools and their argument schemas:
   find_files          — {"pattern": "**/*.ts", "path": "optional dir"}
   search_files        — {"query": "text", "path": "optional dir", "is_regex": false, "include": "*.ts"}
   create_file         — {"path": "path", "content": "full content"}
-  create_folder       — {"path": "Desktop/my-folder"}
+  create_folder       — {"path": "new-folder"}
   edit_file           — {"path": "path", "old_string": "exact text", "new_string": "replacement", "replace_all": false}
   write_file          — {"path": "path", "content": "full content"}
   append_to_file      — {"path": "path", "content": "text"}
@@ -280,6 +335,47 @@ Tools and their argument schemas:
 const TOOL_NAMES = new Set(
     TOOL_DEFINITIONS.map((t) => t.function.name)
 );
+
+const IMPLEMENTATION_TOOL_NAMES = new Set([
+    'create_file', 'create_folder', 'edit_file', 'write_file', 'append_to_file',
+    'rename_file', 'copy_file', 'delete_file', 'run_command',
+]);
+
+const IMPLEMENTATION_ACTION_FORMAT = {
+    type: 'object',
+    properties: {
+        action: { type: 'string', enum: ['tool', 'final'] },
+        name: { type: 'string', enum: [...TOOL_NAMES] },
+        arguments: { type: 'object' },
+        response: { type: 'string' },
+    },
+    required: ['action', 'name', 'arguments', 'response'],
+    additionalProperties: false,
+};
+
+const IMPLEMENTATION_TOOL_CATALOG = TOOL_DEFINITIONS.map((definition) => {
+    const fn = definition.function;
+    return `${fn.name}: ${fn.description} Arguments: ${JSON.stringify(fn.parameters)}`;
+}).join('\n');
+
+function parseImplementationAction(content: string): {
+    toolCall?: OllamaToolCall;
+    response?: string;
+} {
+    try {
+        const parsed = JSON.parse(content) as Record<string, unknown>;
+        if (parsed.action === 'tool') {
+            const toolCall = toToolCall({ name: parsed.name, arguments: parsed.arguments });
+            return toolCall ? { toolCall } : {};
+        }
+        if (parsed.action === 'final' && typeof parsed.response === 'string') {
+            return { response: parsed.response };
+        }
+    } catch {
+        return {};
+    }
+    return {};
+}
 
 function asArgs(value: unknown): Record<string, unknown> | undefined {
     if (typeof value === 'string') {
@@ -526,6 +622,11 @@ export class Agent {
             ? `${customSystemPrompt}${REQUIRED_TOOL_PROMPT}`
             : DEFAULT_SYSTEM_PROMPT;
         const workspaceContext = this.buildWorkspaceContext();
+        const latestUserRequest = userMessage.trim();
+        const isAffirmativeContinuation = /^(yes|yeah|yep|go ahead|continue|proceed|do it|okay|ok)[.!\s]*$/i.test(latestUserRequest);
+        const isImplementationRequest = /\b(create|build|implement|write|modify|update|fix|refactor|develop|add|generate|make|continue|run|test)\b/i.test(latestUserRequest)
+            || isAffirmativeContinuation;
+        let hasTakenImplementationAction = false;
 
         const callCounts = new Map<string, number>();
         let finished = false;
@@ -537,8 +638,12 @@ export class Agent {
             const isTextMode = this.toolMode === 'text';
             const systemContent = baseSystemContent + '\n\n' + this.buildEnvironment()
                 + '\n\n' + workspaceContext
+                + (isImplementationRequest
+                    ? `\n\nIMPLEMENTATION ACTION MODE:\nReturn exactly one JSON object matching the required schema. Do not write a plan. Choose action "tool" to request the single next tool call needed; use the exact registered tool name and arguments, preferring workspace inspection or an edit/create/write action. Choose action "final" only for a concise final answer after the requested work is complete or if you need to state a genuine blocker. Never describe future actions as if they were done.\nAvailable tool names, descriptions, and argument schemas:\n${IMPLEMENTATION_TOOL_CATALOG}`
+                    : '')
                 + (isTextMode ? TEXT_MODE_TOOL_INSTRUCTIONS : '');
-            const tools = isTextMode ? [] : TOOL_DEFINITIONS;
+            const structuredActions = isImplementationRequest;
+            const tools = isTextMode || structuredActions ? [] : TOOL_DEFINITIONS;
 
             this.trimHistory();
             post({ type: 'streamStart' });
@@ -549,8 +654,13 @@ export class Agent {
                     model,
                     [{ role: 'system', content: systemContent }, ...this.history],
                     tools,
-                    (token) => post({ type: 'token', text: token }),
-                    this.stopRef
+                    () => post({ type: 'agentActivity', text: 'Working through the request…' }),
+                    this.stopRef,
+                    (content, nativeCalls) => nativeCalls.length > 0
+                        || (structuredActions && !!parseImplementationAction(content).toolCall)
+                        || parseTextToolCalls(content).length > 0
+                        || (!structuredActions && parseJsonToolCall(stripToolBlocks(content)).calls.length > 0),
+                    structuredActions ? IMPLEMENTATION_ACTION_FORMAT : undefined
                 );
             } catch (err) {
                 if (err instanceof ToolsNotSupportedError && this.toolMode === 'native') {
@@ -570,91 +680,107 @@ export class Agent {
                 break;
             }
 
-            post({ type: 'streamEnd' });
-
             // A stopped stream can still resolve with partial content. Never execute
             // tool calls parsed from that incomplete response.
             if (this.stopRef.stop) {
+                post({ type: 'streamEnd' });
+                this.replaceLastBubble('');
                 finished = true;
                 break;
             }
 
             // ── Extract tool calls depending on mode ──────────────────────────
             let toolCalls: OllamaToolCall[];
-            let displayContent: string;
 
-            if (isTextMode) {
+            if (structuredActions) {
+                const action = parseImplementationAction(result.content);
+                if (action.toolCall) {
+                    toolCalls = [action.toolCall];
+                } else if (action.response !== undefined) {
+                    result.content = action.response;
+                    toolCalls = [];
+                } else {
+                    toolCalls = [];
+                    result.content = '';
+                    logError('Implementation action response did not match the required action schema.');
+                }
+            } else if (isTextMode) {
                 const textToolCalls = parseTextToolCalls(result.content);
                 const withoutToolBlocks = stripToolBlocks(result.content);
                 const parsedJson = parseJsonToolCall(withoutToolBlocks);
                 toolCalls = [...textToolCalls, ...parsedJson.calls];
-                displayContent = parsedJson.remaining;
                 if (parsedJson.calls.length) {
                     logInfo(`Text-mode JSON tool-call fallback — ${parsedJson.calls.map((c) => c.function.name).join(', ')}`);
                 }
             } else {
                 toolCalls = result.toolCalls ?? [];
-                displayContent = result.content;
 
                 // Fallback: model printed the tool call as JSON instead of using tool_calls.
                 if (!toolCalls.length) {
                     const parsed = parseJsonToolCall(result.content);
                     if (parsed.calls.length) {
                         toolCalls = parsed.calls;
-                        displayContent = parsed.remaining;
                         logInfo(`JSON tool-call fallback — ${parsed.calls.map((c) => c.function.name).join(', ')}`);
                     }
                 }
             }
 
-            // The raw tool block / JSON was already streamed into the bubble — replace it.
-            // Also drop the bubble when the model only made tool calls (no text), otherwise an
-            // empty "AGENT" header is left in the chat for every tool step.
-            if (toolCalls.length && (displayContent !== result.content || !displayContent.trim())) {
-                this.replaceLastBubble(displayContent);
+            // Keep intermediate narration and serialized tool requests out of the chat.
+            if (toolCalls.length) {
+                post({ type: 'streamEnd' });
+                this.replaceLastBubble('');
             }
 
-            // History: text mode keeps the raw <tool> block so the model sees its own format;
-            // native mode stores structured tool_calls.
-            this.history.push({
+            const assistantContent = toolCalls.length
+                ? (isTextMode || structuredActions
+                    ? toolCalls.map((call) => `<tool>${JSON.stringify({
+                        name: call.function.name,
+                        arguments: call.function.arguments,
+                    })}</tool>`).join('\n')
+                    : '')
+                : result.content;
+
+            const assistantMessage: OllamaMessage = {
                 role: 'assistant',
-                content: isTextMode ? result.content : displayContent,
+                content: assistantContent,
                 ...(toolCalls.length && !isTextMode ? { tool_calls: toolCalls } : {}),
-            });
+            };
 
             if (!toolCalls.length) {
-                if (!result.content.trim() && !this.stopRef.stop) {
-                    post({ type: 'error', text: 'The model returned an empty response. Try again, or use a larger model.' });
-                }
-
-                // Small local models sometimes answer implementation requests with pasted code
-                // instead of invoking file tools. Do not accept that as completed work. Retry
-                // a bounded number of times with an explicit instruction to use workspace tools.
-                const latestUserRequest = userMessage.trim();
-                const isAffirmativeContinuation = /^(yes|yeah|yep|go ahead|continue|proceed|do it|okay|ok)[.!\s]*$/i.test(latestUserRequest);
-                const isImplementationRequest = /\b(create|build|implement|write|modify|update|fix|refactor|develop|add|generate|make|continue)\b/i.test(latestUserRequest)
-                    || isAffirmativeContinuation;
-                const looksLikeUnwrittenCode = /```|\b(?:touch|mkdir|cat\s+>|pythonCopy|shCopy|python\s*Copy|def\s+\w+|class\s+\w+|from\s+fastapi|import\s+fastapi|@app\.|npm\s+install|uvicorn|Create\s+`?[^`\n]+\.(?:py|ts|tsx|js|jsx|json|env)`?)/i.test(result.content);
-                const looksLikePlan = /\b(?:i(?:'ll| will)|let me|i can|plan to|here(?:'s| is) (?:how|the plan)|first,?\s+i(?:'ll| will))\b/i.test(result.content);
-
-                if (isImplementationRequest && (looksLikeUnwrittenCode || looksLikePlan) && noToolImplementationRetries < 3 && !this.stopRef.stop) {
+                if (isImplementationRequest && !hasTakenImplementationAction && noToolImplementationRetries < 3 && !this.stopRef.stop) {
                     noToolImplementationRetries++;
                     logInfo(`Implementation response had no tool calls; requesting tool-based execution (${noToolImplementationRetries}/3)`);
-                    if (this.toolMode === 'native') {
-                        this.toolMode = 'text';
-                        post({ type: 'modeSwitch', mode: 'text', model });
-                    }
-                    this.replaceLastBubble('The model returned instructions/code without executing tools. Continuing by creating or editing the actual workspace files…');
+                    post({ type: 'streamEnd' });
+                    this.replaceLastBubble('');
+                    post({ type: 'agentActivity', text: 'No tool action was returned. Retrying with an explicit workspace-tool request…' });
                     this.history.push({
                         role: 'user',
-                        content: 'Do not print code, shell commands, or instructions in chat. The previous response did not execute any tools. Continue the requested implementation by using the available file tools now. Inspect the workspace if needed, create or edit the actual files, run relevant checks, and only summarize after the changes are confirmed. If a required tool is unavailable, state the blocker instead of pretending the work is done.'
+                        content: 'The previous response did not take an implementation action. Continue now by selecting exactly one actual workspace tool action. Do not return a plan or code in chat. If work is complete, only return a concise final response after an implementation action succeeded; otherwise identify a concrete blocker.'
                     });
                     continue;
                 }
 
+                if (isImplementationRequest && !hasTakenImplementationAction) {
+                    post({ type: 'streamEnd' });
+                    this.replaceLastBubble('');
+                    const text = 'I could not get this model to execute workspace tools after several attempts. No implementation was applied. Try a tool-capable coding model, such as qwen2.5-coder, and send the request again.';
+                    post({ type: 'error', text });
+                    this.history.push({ role: 'assistant', content: text });
+                    finished = true;
+                    break;
+                }
+
+                if (!result.content.trim() && !this.stopRef.stop) {
+                    post({ type: 'error', text: 'The model returned an empty response. Try again, or use a larger model.' });
+                }
+                this.history.push(assistantMessage);
+                post({ type: 'token', text: result.content });
+                post({ type: 'streamEnd' });
                 finished = true;
                 break;
             }
+
+            this.history.push(assistantMessage);
 
             // ── Execute tool calls ────────────────────────────────────────────
             for (let i = 0; i < toolCalls.length; i++) {
@@ -699,7 +825,10 @@ export class Agent {
                     }
                 }
                 post({ type: 'toolResult', id: toolId, name, success: ok, preview: toolResult.slice(0, 400) });
-                this.pushToolResult(isTextMode, name, toolResult);
+                this.pushToolResult(isTextMode || structuredActions, name, toolResult);
+                if (ok && IMPLEMENTATION_TOOL_NAMES.has(name)) {
+                    hasTakenImplementationAction = true;
+                }
             }
         }
 
@@ -791,7 +920,7 @@ export class Agent {
             `Downloads: ${this.knownFolder('Downloads') ?? '(not found)'}`,
             `Workspace root: ${this.workspaceRoot || '(no folder open — relative paths resolve to the home folder)'}`,
             `Today: ${new Date().toDateString()}`,
-            'Paths may be absolute (anywhere on this computer), "~/...", "Desktop/...", "Documents/...", "Downloads/...", or relative to the workspace root.',
+            'Relative paths always resolve from the current workspace root. Use an absolute path or "~/..." only when the user explicitly asks for a location outside the workspace.',
             '═══════════════════',
         ];
         return lines.join('\n');
@@ -846,17 +975,6 @@ export class Agent {
         }
         if (path.isAbsolute(p)) { return path.resolve(p); }
 
-        // "Desktop/foo" → the real Desktop (unless the workspace really has such a folder)
-        const parts = p.split(/[\\/]+/).filter(Boolean);
-        const first = parts[0]?.toLowerCase();
-        const wk = first === 'desktop' ? 'Desktop'
-            : first === 'documents' ? 'Documents'
-            : first === 'downloads' ? 'Downloads'
-            : undefined;
-        if (wk && !fs.existsSync(path.resolve(this.root, parts[0]))) {
-            const folder = this.knownFolder(wk);
-            if (folder) { return path.resolve(folder, ...parts.slice(1)); }
-        }
         return path.resolve(this.root, p);
     }
 
@@ -1069,7 +1187,12 @@ export class Agent {
                 }
                 fs.mkdirSync(path.dirname(full), { recursive: true });
                 fs.writeFileSync(full, content, 'utf8');
-                this.postFn({ type: 'fileChanged', path: this.displayPath(full), action: 'created' });
+                this.postFn({
+                    type: 'fileChanged',
+                    path: this.displayPath(full),
+                    action: 'created',
+                    ...countLineChanges('', content),
+                });
                 return `Created: ${full} (${content.split('\n').length} lines)`;
             }
 
@@ -1106,9 +1229,16 @@ export class Agent {
                     exists
                 );
                 if (!ok) { return 'Write cancelled by user.'; }
+                const previousContent = exists && fs.existsSync(full) ? fs.readFileSync(full, 'utf8') : '';
+                const lineChanges = countLineChanges(previousContent, content);
                 fs.mkdirSync(path.dirname(full), { recursive: true });
                 fs.writeFileSync(full, content, 'utf8');
-                this.postFn({ type: 'fileChanged', path: this.displayPath(full), action: exists ? 'written' : 'created' });
+                this.postFn({
+                    type: 'fileChanged',
+                    path: this.displayPath(full),
+                    action: exists ? 'written' : 'created',
+                    ...lineChanges,
+                });
                 return `${exists ? 'Overwrote' : 'Created'}: ${full} (${lineCount} lines)`;
             }
 
@@ -1121,8 +1251,14 @@ export class Agent {
                 if (!(await this.authorize('append_to_file', full, `Ollama Agent wants to append to:\n${full}`, 'Append', false))) {
                     return 'Append cancelled by user.';
                 }
+                const previousContent = fs.readFileSync(full, 'utf8');
                 fs.appendFileSync(full, content, 'utf8');
-                this.postFn({ type: 'fileChanged', path: this.displayPath(full), action: 'appended' });
+                this.postFn({
+                    type: 'fileChanged',
+                    path: this.displayPath(full),
+                    action: 'appended',
+                    ...countLineChanges(previousContent, previousContent + content),
+                });
                 return `Appended ${content.length} chars to ${full}`;
             }
 
@@ -1165,6 +1301,7 @@ export class Agent {
                 if (!fs.existsSync(full)) { throw new Error(`Not found: ${full}`); }
                 this.assertDeletable(full);
                 const isDir = this.isDir(full);
+                const removedLines = !isDir ? splitLines(fs.readFileSync(full, 'utf8')).length : undefined;
                 const ok = await this.authorize(
                     'delete_file',
                     full,
@@ -1174,7 +1311,12 @@ export class Agent {
                 );
                 if (!ok) { return 'Delete cancelled by user.'; }
                 fs.rmSync(full, { recursive: true, force: false });
-                this.postFn({ type: 'fileChanged', path: this.displayPath(full), action: 'deleted' });
+                this.postFn({
+                    type: 'fileChanged',
+                    path: this.displayPath(full),
+                    action: 'deleted',
+                    ...(removedLines !== undefined ? { removed: removedLines } : {}),
+                });
                 return `Deleted ${isDir ? 'folder' : 'file'}: ${full}`;
             }
 
@@ -1345,7 +1487,13 @@ export class Agent {
         }
 
         fs.writeFileSync(full, updated, 'utf8');
-        this.postFn({ type: 'fileChanged', path: rel, action: 'edited' });
+        const perEditChanges = countLineChanges(oldStr, newStr);
+        const editCount = replaceAll ? occurrences : 1;
+        const lineChanges = {
+            added: perEditChanges.added * editCount,
+            removed: perEditChanges.removed * editCount,
+        };
+        this.postFn({ type: 'fileChanged', path: rel, action: 'edited', ...lineChanges });
         return `Edited: ${rel} — ${summary}`;
     }
 

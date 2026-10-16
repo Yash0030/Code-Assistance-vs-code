@@ -240,7 +240,7 @@ The AI can autonomously call the following tools during a conversation:
 | `memory_write` | Save a persistent note (fact, decision, convention) about the project | — |
 | `memory_delete` | Delete a saved note by id | — |
 
-> **Safety:** All file modifications and command executions require explicit confirmation via a VS Code dialog. Paths are validated to stay within the workspace root. Dangerous command patterns (`rm -rf /`, `mkfs`, etc.) are blocked before the confirmation dialog even appears.
+> **Safety:** Relative paths resolve from the open workspace. Requests to modify files outside it require approval, as do command execution and destructive operations. Dangerous command patterns (`rm -rf /`, `mkfs`, etc.) are blocked before the confirmation dialog appears.
 
 ### Example agent workflow
 
