@@ -176,7 +176,7 @@ That's it. The agent will start responding immediately.
 
 ### 🤖 AI Agent
 - Multi-turn **agentic tool loop** — the AI can call tools, read results, then continue reasoning
-- Supports **14 workspace tools** (see [Agent Tools](#-agent-tools) below)
+- Supports **19 workspace tools** (see [Agent Tools](#-agent-tools) below)
 - **Live command output** — terminal output streams directly into the chat
 - **Diff preview** before applying file edits
 - **Confirmation dialogs** for all destructive actions (write, delete, run command)
@@ -369,6 +369,7 @@ Open `Settings` (`Ctrl+,` / `Cmd+,`) and search for **"Ollama"** to see all opti
 | `ollamaAgent.baseUrl` | `""` | Full Ollama URL, e.g. `http://localhost:11434`. Overrides host + port when set. Useful for remote Ollama instances. |
 | `ollamaAgent.host` | `localhost` | Ollama hostname (used only when `baseUrl` is empty) |
 | `ollamaAgent.port` | `11434` | Ollama port (used only when `baseUrl` is empty) |
+| `ollamaAgent.numCtx` | `16384` | Context window sent to Ollama. Larger values help with longer tasks and tool use, but require more memory. |
 | `ollamaAgent.model` | `llama2` | Default model at startup. Overridable per session via the dropdown. |
 | `ollamaAgent.temperature` | `0.7` | Sampling temperature. 0 = deterministic, 1 = balanced, 2 = creative |
 | `ollamaAgent.systemPrompt` | `""` | Custom system prompt. Leave empty to use the built-in coding assistant prompt. |

@@ -10,6 +10,8 @@ export interface OllamaMessage {
     role: 'system' | 'user' | 'assistant' | 'tool';
     content: string;
     tool_calls?: OllamaToolCall[];
+    /** Name of the tool that produced this message (Ollama tool-role messages). */
+    tool_name?: string;
 }
 
 export interface OllamaToolCall {

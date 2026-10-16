@@ -128,6 +128,12 @@
           "default": 11434,
           "description": "Ollama server port (used only when baseUrl is empty)."
         },
+        "ollamaAgent.numCtx": {
+          "type": "number",
+          "default": 16384,
+          "minimum": 1024,
+          "markdownDescription": "Context window size sent to Ollama. Larger values help with longer coding tasks and tool use, but require more memory."
+        },
         "ollamaAgent.model": {
           "type": "string",
           "default": "llama2",

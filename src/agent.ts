@@ -218,6 +218,8 @@ Tools:
 
 How to work:
 - You have real tools. When the user asks for something to be done, DO it with the tools instead of describing how. Never claim you cannot access the user's files or Desktop; use an absolute path or Desktop/..., Documents/..., ~/... .
+- For implementation requests, start by inspecting the relevant files and then use file tools to make the requested changes. A plan, code snippet, or promise to edit is not a completed task.
+- Use multiple tool calls when useful. After each tool result, continue until the requested work is actually complete and verified.
 - The editor itself asks the user for approval on risky actions, so do not ask for permission in chat — just call the tool.
 - Explore before changing: use workspace_summary, find_files, search_files and read_file. Never guess file contents.
 - For existing files read_file first, then use edit_file with an exact, unique old_string. Use write_file only for new files or full rewrites.
@@ -225,7 +227,18 @@ How to work:
 - If a tool returns an error, read it, adjust and retry with a different approach. Do not repeat the same failing call.
 - Work step by step; after each tool result continue until the task is fully done, then give a short summary of what you changed.
 - Only report success for things that a tool result confirmed.
-- Be concise. Put code in markdown fenced code blocks.`;
+- For implementation requests, source code shown in chat does NOT count as implementation. Write it to the workspace using create_file, write_file, or edit_file.
+- Do not stop after creating directories or configuration templates if source files are still required.
+- Before finalizing an implementation request, inspect the workspace and verify that the main requested source files exist.
+- NEVER print source code, shell commands, or file contents in chat as a substitute for tool use. Use create_file, write_file, edit_file, and run_command. If you have not actually changed files, say so plainly.
+- Be concise. Summarize only confirmed changes after tools finish.`;
+
+const REQUIRED_TOOL_PROMPT = `
+
+Tool-use requirements:
+- For implementation requests, inspect and change the actual workspace files using the available tools; a plan or code in chat is not a completed implementation.
+- Continue calling tools after each result until the requested change is complete and verified.
+- Do not claim that a file was changed unless a file tool confirms it.`;
 
 // ── Text-mode tool calling (fallback for models without native tool support) ──
 
@@ -237,9 +250,9 @@ You can call tools by outputting a tool call block in EXACTLY this format — no
 <tool>{"name": "TOOL_NAME", "arguments": {JSON_ARGS}}</tool>
 
 IMPORTANT:
-- Output ONLY the <tool>...</tool> block when calling a tool.
-- After receiving a [TOOL RESULT: ...] block, continue the task (call another tool or give the final answer).
-- Call one tool at a time and wait for its result.
+- Output one or more complete <tool>...</tool> blocks when calling tools, with no explanatory text mixed into the blocks.
+- After receiving tool results, continue the task (call more tools or give the final answer).
+- You may group independent tool calls together. Do not claim work is complete until the tool results confirm it.
 
 Tools and their argument schemas:
   system_info         — {}
@@ -479,6 +492,20 @@ export class Agent {
     // ── Main loop ─────────────────────────────────────────────────────────────
 
     async run(userMessage: string, model: string, post: PostFn): Promise<void> {
+        this.postFn = post;
+        post({ type: 'agentStart' });
+        try {
+            await this.runLoop(userMessage, model, post);
+        } catch (err) {
+            const message = (err as Error).message;
+            logError(`Agent run failed: ${message}`);
+            post({ type: 'error', text: this.friendlyError(message) });
+        } finally {
+            post({ type: 'agentEnd' });
+        }
+    }
+
+    private async runLoop(userMessage: string, model: string, post: PostFn): Promise<void> {
         this.stopRef = { stop: false };
         this.postFn  = post;
         if (this.currentModel !== model) {
@@ -489,10 +516,14 @@ export class Agent {
         logInfo(`Agent run — model: ${model}, mode: ${this.toolMode}, history: ${this.history.length}`);
 
         const cfg = getConfig();
-        const baseSystemContent = cfg.systemPrompt.trim() || DEFAULT_SYSTEM_PROMPT;
+        const customSystemPrompt = cfg.systemPrompt.trim();
+        const baseSystemContent = customSystemPrompt
+            ? `${customSystemPrompt}${REQUIRED_TOOL_PROMPT}`
+            : DEFAULT_SYSTEM_PROMPT;
 
         const callCounts = new Map<string, number>();
         let finished = false;
+        let noToolImplementationRetries = 0;
 
         for (let turn = 0; turn < MAX_TURNS; turn++) {
             if (this.stopRef.stop) { break; }
@@ -575,6 +606,32 @@ export class Agent {
                 if (!result.content.trim() && !this.stopRef.stop) {
                     post({ type: 'error', text: 'The model returned an empty response. Try again, or use a larger model.' });
                 }
+
+                // Small local models sometimes answer implementation requests with pasted code
+                // instead of invoking file tools. Do not accept that as completed work. Retry
+                // a bounded number of times with an explicit instruction to use workspace tools.
+                const latestUserRequest = userMessage.trim();
+                const isAffirmativeContinuation = /^(yes|yeah|yep|go ahead|continue|proceed|do it|okay|ok)[.!\s]*$/i.test(latestUserRequest);
+                const isImplementationRequest = /\b(create|build|implement|write|modify|update|fix|refactor|develop|add|generate|make|continue)\b/i.test(latestUserRequest)
+                    || isAffirmativeContinuation;
+                const looksLikeUnwrittenCode = /```|\b(?:touch|mkdir|cat\s+>|pythonCopy|shCopy|python\s*Copy|def\s+\w+|class\s+\w+|from\s+fastapi|import\s+fastapi|@app\.|npm\s+install|uvicorn|Create\s+`?[^`\n]+\.(?:py|ts|tsx|js|jsx|json|env)`?)/i.test(result.content);
+                const looksLikePlan = /\b(?:i(?:'ll| will)|let me|i can|plan to|here(?:'s| is) (?:how|the plan)|first,?\s+i(?:'ll| will))\b/i.test(result.content);
+
+                if (isImplementationRequest && (looksLikeUnwrittenCode || looksLikePlan) && noToolImplementationRetries < 3 && !this.stopRef.stop) {
+                    noToolImplementationRetries++;
+                    logInfo(`Implementation response had no tool calls; requesting tool-based execution (${noToolImplementationRetries}/3)`);
+                    if (this.toolMode === 'native') {
+                        this.toolMode = 'text';
+                        post({ type: 'modeSwitch', mode: 'text', model });
+                    }
+                    this.replaceLastBubble('The model returned instructions/code without executing tools. Continuing by creating or editing the actual workspace files…');
+                    this.history.push({
+                        role: 'user',
+                        content: 'Do not print code, shell commands, or instructions in chat. The previous response did not execute any tools. Continue the requested implementation by using the available file tools now. Inspect the workspace if needed, create or edit the actual files, run relevant checks, and only summarize after the changes are confirmed. If a required tool is unavailable, state the blocker instead of pretending the work is done.'
+                    });
+                    continue;
+                }
+
                 finished = true;
                 break;
             }

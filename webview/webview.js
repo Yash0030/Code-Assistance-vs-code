@@ -888,7 +888,6 @@ sendBtn.addEventListener('click', sendMessage);
 
 stopBtn.addEventListener('click', () => {
     vscode.postMessage({ command: 'stopGeneration' });
-    setStreaming(false);
 });
 
 newChatBtn.addEventListener('click', () => {
@@ -1040,6 +1039,14 @@ window.addEventListener('message', (event) => {
             populateModels(msg.models, msg.connected);
             break;
 
+        case 'agentStart':
+            setStreaming(true);
+            break;
+
+        case 'agentEnd':
+            setStreaming(false);
+            break;
+
         case 'streamStart':
             startAssistantMessage();
             break;
@@ -1050,7 +1057,6 @@ window.addEventListener('message', (event) => {
 
         case 'streamEnd':
             finalizeMessage();
-            setStreaming(false);
             break;
 
         case 'toolCall':
