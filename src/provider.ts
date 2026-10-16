@@ -142,30 +142,7 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
                         : text;
 
                     // Wrap post() to capture streamed tokens → save assistant message
-                    let assistantBuf = '';
-                    const trackedPost: PostFn = (m: object) => {
-                        post(m);
-                        const pm = m as { type: string; text?: string };
-                        if (pm.type === 'token') {
-                            assistantBuf += pm.text ?? '';
-                        } else if (pm.type === 'streamEnd') {
-                            if (assistantBuf.trim()) {
-                                const clean = assistantBuf
-                                    .replace(/<tool>[\s\S]*?<\/tool>\s*/g, '')
-                                    .replace(/<mention[\s\S]*?<\/mention>\s*/g, '')
-                                    .replace(/<git-diff[\s\S]*?<\/git-diff>\s*/g, '')
-                                    .trim();
-                                this.appendToSession({ role: 'assistant', content: clean, timestamp: Date.now() });
-                                logInfo(`[assistant] ${clean.slice(0, 120)}${clean.length > 120 ? '…' : ''}`);
-                            }
-                            assistantBuf = '';
-                            this.persistSession();
-                        } else if (pm.type === 'error') {
-                            const errText = (m as { type: string; text: string }).text;
-                            this.appendToSession({ role: 'error', content: errText, timestamp: Date.now() });
-                            this.persistSession();
-                        }
-                    };
+                    const trackedPost = this.makeTrackedPost(post, true);
 
                     await this._agent!.run(fullMessage, model, trackedPost);
                     // Sync agent history into session after run completes
@@ -200,19 +177,7 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
                     post({ type: 'removeLastAssistant' });
                     logInfo('[provider] Retrying last message…');
 
-                    let assistantBuf2 = '';
-                    const retryPost: PostFn = (m: object) => {
-                        post(m);
-                        const pm = m as { type: string; text?: string };
-                        if (pm.type === 'token') { assistantBuf2 += pm.text ?? ''; }
-                        else if (pm.type === 'streamEnd') {
-                            if (assistantBuf2.trim()) {
-                                this.appendToSession({ role: 'assistant', content: assistantBuf2.replace(/<tool>[\s\S]*?<\/tool>\s*/g, '').replace(/<mention[\s\S]*?<\/mention>\s*/g, '').replace(/<git-diff[\s\S]*?<\/git-diff>\s*/g, '').trim(), timestamp: Date.now() });
-                            }
-                            assistantBuf2 = '';
-                            this.persistSession();
-                        }
-                    };
+                    const retryPost = this.makeTrackedPost(post, true);
 
                     await this._agent!.run(lastMsg, model, retryPost);
                     this.currentSession.agentHistory = this._agent!.conversationHistory;
@@ -359,6 +324,60 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
         ) {
             this.currentSession.messages.pop();
         }
+    }
+
+    /**
+     * Wraps the webview `post` so streamed tokens are saved into the chat session.
+     * Also honours `removeLastAssistant`: when the agent replaces a bubble (e.g. it streamed raw
+     * tool-call JSON and then swapped in clean text) the stored copy is dropped too, so reloading
+     * the session never shows the raw JSON.
+     */
+    private makeTrackedPost(post: (m: object) => unknown, saveErrors: boolean): PostFn {
+        let buf = '';
+        let lastSavedIndex = -1;
+        return (m: object) => {
+            post(m);
+            const pm = m as { type: string; text?: string };
+            switch (pm.type) {
+                case 'streamStart':
+                    buf = '';
+                    lastSavedIndex = -1;
+                    break;
+                case 'token':
+                    buf += pm.text ?? '';
+                    break;
+                case 'streamEnd': {
+                    if (buf.trim()) {
+                        const clean = buf
+                            .replace(/<tool>[\s\S]*?<\/tool>\s*/g, '')
+                            .replace(/<mention[\s\S]*?<\/mention>\s*/g, '')
+                            .replace(/<git-diff[\s\S]*?<\/git-diff>\s*/g, '')
+                            .trim();
+                        this.appendToSession({ role: 'assistant', content: clean, timestamp: Date.now() });
+                        lastSavedIndex = this.currentSession.messages.length - 1;
+                        logInfo(`[assistant] ${clean.slice(0, 120)}${clean.length > 120 ? '…' : ''}`);
+                    }
+                    buf = '';
+                    this.persistSession();
+                    break;
+                }
+                case 'removeLastAssistant': {
+                    const msgs = this.currentSession.messages;
+                    if (lastSavedIndex >= 0 && lastSavedIndex === msgs.length - 1 && msgs[lastSavedIndex].role === 'assistant') {
+                        msgs.pop();
+                    }
+                    lastSavedIndex = -1;
+                    break;
+                }
+                case 'error':
+                    if (saveErrors) {
+                        const errText = (m as { type: string; text: string }).text;
+                        this.appendToSession({ role: 'error', content: errText, timestamp: Date.now() });
+                        this.persistSession();
+                    }
+                    break;
+            }
+        };
     }
 
     private persistSession(): void {

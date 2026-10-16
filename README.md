@@ -1,10 +1,10 @@
 <div align="center">
 
-<img src="images/logo.png" alt="OllamaPilot Logo" width="160" />
+<!-- <img src="images/logo.png" alt="OllamaPilot Logo" width="160" /> -->
 
 # OllamaPilot
 
-### A fully local, offline AI coding assistant for VS Code — powered by Ollama
+### A fully local, offline AI coding assistant for VS Code
 
 [![VS Code Marketplace](https://img.shields.io/visual-studio-marketplace/v/kchikech.ollamapilot?label=Marketplace&color=007ACC&logo=visual-studio-code)](https://marketplace.visualstudio.com/items?itemName=kchikech.ollamapilot)
 [![Installs](https://img.shields.io/visual-studio-marketplace/i/kchikech.ollamapilot?label=Installs&color=007ACC)](https://marketplace.visualstudio.com/items?itemName=kchikech.ollamapilot)
@@ -700,7 +700,7 @@ MIT License — see [LICENSE](LICENSE) for details.
 
 <div align="center">
 
-**Made with ❤️ by the open-source community**
+<!-- **Made with ❤️ by the open-source community** -->
 
 [Report a Bug](https://github.com/kchikech/Ollama_Agent/issues) · [Request a Feature](https://github.com/kchikech/Ollama_Agent/issues) · [Contribute](CONTRIBUTING.md)
 

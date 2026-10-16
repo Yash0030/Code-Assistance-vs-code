@@ -1,5 +1,6 @@
 import * as http from 'http';
 import * as https from 'https';
+import * as vscode from 'vscode';
 import { getConfig, parseBaseUrl } from './config';
 import { logInfo, logError } from './logger';
 
@@ -20,6 +21,13 @@ export interface StreamResult {
     toolCalls: OllamaToolCall[];
 }
 
+/** Shape of one NDJSON line from Ollama's /api/chat stream. */
+interface ChatChunk {
+    message?: { content?: string; tool_calls?: OllamaToolCall[] };
+    done?: boolean;
+    error?: string;
+}
+
 // ── Endpoint helpers ──────────────────────────────────────────────────────────
 
 function getEndpoint(): { hostname: string; port: number; isHttps: boolean } {
@@ -36,6 +44,16 @@ function makeRequest(
     return isHttps
         ? https.request(options, callback)
         : http.request(options, callback);
+}
+
+/**
+ * Context window sent to Ollama. Ollama's own default is only ~2-4k tokens, which is far
+ * too small for the tool definitions + system prompt + conversation, so the model silently
+ * "forgets" its tools. Override with the `ollamaAgent.numCtx` setting (8192 if your GPU is small).
+ */
+function getNumCtx(): number {
+    const v = vscode.workspace.getConfiguration('ollamaAgent').get<number>('numCtx', 16384);
+    return Number.isFinite(v) && v >= 1024 ? Math.floor(v) : 16384;
 }
 
 // ── HTTP helpers ──────────────────────────────────────────────────────────────
@@ -78,20 +96,37 @@ export function streamChatRequest(
     return new Promise((resolve, reject) => {
         const { hostname, port } = getEndpoint();
         const cfg = getConfig();
+        const numCtx = getNumCtx();
         const payload: Record<string, unknown> = {
             model,
             messages,
             stream: true,
+            keep_alive: '30m', // keep the model loaded between turns
+            options: {
+                num_ctx: numCtx,
+                temperature: cfg.temperature,
+            },
         };
         // Only include tools if non-empty (some models reject the field when empty)
         if (tools.length) { payload.tools = tools; }
-        // Only include options if temperature is non-default
-        if (cfg.temperature !== 0.7) {
-            payload.options = { temperature: cfg.temperature };
-        }
 
         const body = JSON.stringify(payload);
-        logInfo(`POST /api/chat  model=${model}  msgs=${messages.length}`);
+        logInfo(`POST /api/chat  model=${model}  msgs=${messages.length}  num_ctx=${numCtx}`);
+
+        let fullContent = '';
+        const toolCalls: OllamaToolCall[] = [];
+        let settled = false;
+
+        const succeed = () => {
+            if (settled) { return; }
+            settled = true;
+            resolve({ content: fullContent, toolCalls });
+        };
+        const fail = (err: Error) => {
+            if (settled) { return; }
+            settled = true;
+            reject(err);
+        };
 
         const req = makeRequest(
             {
@@ -108,50 +143,67 @@ export function streamChatRequest(
                     res.on('end', () => {
                         // Detect the "model does not support tools" 400 specifically
                         if (res.statusCode === 400 && e.toLowerCase().includes('does not support tools')) {
-                            reject(new ToolsNotSupportedError(model));
+                            fail(new ToolsNotSupportedError(model));
                         } else {
-                            reject(new Error(`HTTP ${res.statusCode}: ${e}`));
+                            fail(new Error(`HTTP ${res.statusCode}: ${e}`));
                         }
                     });
                     return;
                 }
 
-                let fullContent = '';
-                let toolCalls: OllamaToolCall[] = [];
                 let buf = '';
 
+                const handleLine = (line: string): void => {
+                    if (!line.trim()) { return; }
+                    let p: ChatChunk;
+                    try { p = JSON.parse(line) as ChatChunk; } catch { return; /* skip malformed line */ }
+
+                    // Ollama can report errors inside a 200 stream (e.g. out of memory while loading)
+                    if (p.error) {
+                        fail(new Error(String(p.error)));
+                        req.destroy();
+                        return;
+                    }
+                    if (p.message?.content) {
+                        fullContent += p.message.content;
+                        onToken(p.message.content);
+                    }
+                    if (p.message?.tool_calls?.length) {
+                        // Append (don't overwrite): some models stream one call per chunk
+                        toolCalls.push(...p.message.tool_calls);
+                    }
+                    if (p.done) {
+                        logInfo(`Stream done — ${fullContent.length} chars, ${toolCalls.length} tool calls`);
+                        succeed();
+                    }
+                };
+
                 res.on('data', (chunk: Buffer) => {
-                    if (stopRef.stop) { req.destroy(); return; }
+                    if (stopRef.stop) {
+                        // User pressed Stop: keep what we have instead of surfacing an "aborted" error.
+                        succeed();
+                        req.destroy();
+                        return;
+                    }
                     buf += chunk.toString();
                     const lines = buf.split('\n');
                     buf = lines.pop() ?? '';
-
-                    for (const line of lines) {
-                        if (!line.trim()) { continue; }
-                        try {
-                            const p = JSON.parse(line);
-                            if (p.message?.content) {
-                                fullContent += p.message.content;
-                                onToken(p.message.content);
-                            }
-                            if (p.message?.tool_calls?.length) {
-                                toolCalls = p.message.tool_calls;
-                            }
-                            if (p.done) {
-                                logInfo(`Stream done — ${fullContent.length} chars, ${toolCalls.length} tool calls`);
-                                resolve({ content: fullContent, toolCalls });
-                            }
-                        } catch { /* skip malformed line */ }
-                    }
+                    for (const line of lines) { handleLine(line); }
                 });
 
-                res.on('end', () => resolve({ content: fullContent, toolCalls }));
-                res.on('error', reject);
+                res.on('end', () => {
+                    handleLine(buf); // last line without trailing newline
+                    succeed();
+                });
+                res.on('error', (err) => {
+                    if (stopRef.stop) { succeed(); } else { fail(err); }
+                });
             }
         );
         req.on('error', (err) => {
+            if (stopRef.stop) { succeed(); return; }
             logError(`streamChatRequest: ${err.message}`);
-            reject(err);
+            fail(err);
         });
         req.write(body);
         req.end();
