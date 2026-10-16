@@ -557,7 +557,9 @@ export class Agent {
             }
 
             // The raw tool block / JSON was already streamed into the bubble — replace it.
-            if (toolCalls.length && displayContent !== result.content) {
+            // Also drop the bubble when the model only made tool calls (no text), otherwise an
+            // empty "AGENT" header is left in the chat for every tool step.
+            if (toolCalls.length && (displayContent !== result.content || !displayContent.trim())) {
                 this.replaceLastBubble(displayContent);
             }
 

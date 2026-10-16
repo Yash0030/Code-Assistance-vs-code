@@ -632,8 +632,12 @@
     h2 { font-size: 14px; }
     h3 { font-size: 13px; }
     h4 { font-size: 12px; }
-    ul, ol { padding-left: 16px; margin: 4px 0; }
+    ul, ol { padding-left: 20px; margin: 4px 0; }
     li { margin: 2px 0; }
+    li > ul, li > ol { margin: 2px 0; }
+    li > .code-block { margin: 4px 0; }
+    .msg-content > :first-child { margin-top: 0; }
+    .msg-content > :last-child  { margin-bottom: 0; }
     blockquote {
       border-left: 2px solid var(--vscode-textBlockQuote-border, rgba(128,128,128,0.4));
       padding-left: 8px;

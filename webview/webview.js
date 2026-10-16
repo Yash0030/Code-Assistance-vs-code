@@ -115,7 +115,7 @@ function updateTokenIndicator() {
     totalChars += mentionedFiles.length * 2000;
     if (ctx.includeFile && ctx.fileLines) { totalChars += ctx.fileLines * 40; }
 
-    const estimated = estimateTokens(totalChars);
+    const estimated = Math.ceil(totalChars / 4); // (estimateTokens() expects text, not a char count)
     const window = getContextWindow();
     const pct = estimated / window;
 
@@ -188,6 +188,160 @@ function escHtml(s) {
         .replace(/'/g, '&#39;');
 }
 
+/**
+ * Inline markdown (bold / italic / strike) on text that is already HTML-escaped.
+ * Underscore emphasis only applies at word boundaries, so names like read_file stay intact.
+ * @param {string} s
+ */
+function renderInline(s) {
+    s = s.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>');
+    s = s.replace(/(^|\W)__([^_\n]+)__(?!\w)/g, '$1<strong>$2</strong>');
+    s = s.replace(/(^|[^*\w])\*([^*\s][^*\n]*)\*(?![*\w])/g, '$1<em>$2</em>');
+    s = s.replace(/(^|\W)_([^_\s][^_\n]*)_(?!\w)/g, '$1<em>$2</em>');
+    s = s.replace(/~~([^~\n]+)~~/g, '<s>$1</s>');
+    return s;
+}
+
+const LIST_RE        = /^(\s*)([-*+]|\d{1,3}[.)])\s+(.*)$/;
+const PLACEHOLDER_RE = /^\x01(?:CB|TH)\d+\x01$/;
+const HR_RE          = /^\s*([-*_])(?:\s*\1){2,}\s*$/;
+const HEADING_RE     = /^(#{1,6})\s+(.+)$/;
+
+/** Width of leading whitespace (tab = 4). @param {string} line */
+function leadingIndent(line) {
+    const ws = line.slice(0, line.length - line.trimStart().length);
+    return ws.replace(/\t/g, '    ').length;
+}
+
+/**
+ * Parse one (possibly nested) list starting at lines[start].
+ * Items are emitted as <li> inside a real <ul>/<ol> with NO <br> between them, so no stray gaps.
+ * @param {string[]} lines
+ * @param {number} start
+ * @returns {{html: string, next: number}}
+ */
+function renderList(lines, start) {
+    const first = LIST_RE.exec(lines[start]);
+    if (!first) { return { html: '', next: start + 1 }; }
+
+    const baseIndent = leadingIndent(lines[start]);
+    const ordered    = /^\d/.test(first[2]);
+    const startNum   = ordered ? parseInt(first[2], 10) : 1;
+    let i = start;
+    let items = '';
+
+    while (i < lines.length) {
+        const m = LIST_RE.exec(lines[i]);
+        if (!m) { break; }
+        if (leadingIndent(lines[i]) < baseIndent) { break; }   // belongs to a parent list
+        if (/^\d/.test(m[2]) !== ordered) { break; }            // bullet <-> numbered switch = new list
+
+        let item = renderInline(m[3]);
+        i++;
+
+        // Collect nested lists, indented continuation text and code blocks that belong to this item.
+        while (i < lines.length) {
+            const line = lines[i];
+            const t = line.trim();
+
+            if (!t) {
+                // Blank line: keep going only if the list / item content continues after it.
+                let j = i + 1;
+                while (j < lines.length && !lines[j].trim()) { j++; }
+                if (j >= lines.length) { i = j; break; }
+                if (LIST_RE.test(lines[j]) || leadingIndent(lines[j]) > baseIndent) { i = j; continue; }
+                break;
+            }
+
+            if (LIST_RE.test(line)) {
+                if (leadingIndent(line) > baseIndent) {
+                    const sub = renderList(lines, i);
+                    item += sub.html;
+                    i = sub.next;
+                    continue;
+                }
+                break; // sibling or parent item
+            }
+            if (PLACEHOLDER_RE.test(t)) { item += t; i++; continue; }          // code block inside the item
+            if (leadingIndent(line) > baseIndent) {                            // indented continuation text
+                item += '<br>' + renderInline(t);
+                i++;
+                continue;
+            }
+            break;
+        }
+        items += `<li>${item}</li>`;
+    }
+
+    const tag = ordered ? 'ol' : 'ul';
+    const startAttr = ordered && startNum !== 1 ? ` start="${startNum}"` : '';
+    return { html: `<${tag}${startAttr}>${items}</${tag}>`, next: i };
+}
+
+/**
+ * Block-level markdown on escaped text: headings, rules, quotes, lists, paragraphs.
+ * @param {string} text
+ */
+function renderBlocks(text) {
+    const lines = text.split('\n');
+    /** @type {string[]} */
+    const out = [];
+    let i = 0;
+
+    const startsBlock = (/** @type {string} */ l) => {
+        const t = l.trim();
+        return !t || PLACEHOLDER_RE.test(t) || HR_RE.test(l) || HEADING_RE.test(t) ||
+               t.startsWith('&gt;') || LIST_RE.test(l);
+    };
+
+    while (i < lines.length) {
+        const line = lines[i];
+        const t = line.trim();
+
+        if (!t) { i++; continue; }
+        if (PLACEHOLDER_RE.test(t)) { out.push(t); i++; continue; }
+        if (HR_RE.test(line))       { out.push('<hr>'); i++; continue; }
+
+        const h = HEADING_RE.exec(t);
+        if (h) {
+            const level = h[1].length;
+            const tag = level === 1 ? 'h2' : level <= 3 ? 'h3' : 'h4';
+            out.push(`<${tag}>${renderInline(h[2])}</${tag}>`);
+            i++;
+            continue;
+        }
+
+        if (t.startsWith('&gt;')) {
+            /** @type {string[]} */
+            const quote = [];
+            while (i < lines.length && lines[i].trim().startsWith('&gt;')) {
+                quote.push(renderInline(lines[i].trim().replace(/^&gt;\s?/, '')));
+                i++;
+            }
+            out.push(`<blockquote>${quote.join('<br>')}</blockquote>`);
+            continue;
+        }
+
+        if (LIST_RE.test(line)) {
+            const list = renderList(lines, i);
+            out.push(list.html);
+            i = list.next;
+            continue;
+        }
+
+        // Paragraph: consecutive plain lines (single newline = line break)
+        /** @type {string[]} */
+        const para = [];
+        while (i < lines.length && !startsBlock(lines[i])) {
+            para.push(renderInline(lines[i].trim()));
+            i++;
+        }
+        if (!para.length) { para.push(renderInline(t)); i++; } // safety: always make progress
+        out.push(`<p>${para.join('<br>')}</p>`);
+    }
+    return out.join('');
+}
+
 /** @param {string} text */
 function renderMarkdown(text) {
     // 1. Extract fenced code blocks → placeholders
@@ -220,33 +374,23 @@ function renderMarkdown(text) {
     // 4. Escape remaining HTML
     text = escHtml(text);
 
-    // 5. Block-level markdown
-    text = text.replace(/^#{4} (.+)$/gm, '<h4>$1</h4>');
-    text = text.replace(/^#{3} (.+)$/gm, '<h3>$1</h3>');
-    text = text.replace(/^#{2} (.+)$/gm, '<h3>$1</h3>');
-    text = text.replace(/^# (.+)$/gm,    '<h2>$1</h2>');
-    text = text.replace(/^&gt; (.+)$/gm, '<blockquote>$1</blockquote>');
-    text = text.replace(/^---+$/gm,      '<hr>');
-    text = text.replace(/^\s*[-*] (.+)$/gm, '<li>$1</li>');
-    text = text.replace(/(<li>.*<\/li>\n?)+/g, (m) => `<ul>${m}</ul>`);
-    text = text.replace(/^\s*\d+\. (.+)$/gm, '<li>$1</li>');
+    // 5. Put code / think placeholders on their own lines so they become real block elements
+    text = text.replace(/\x01(?:CB|TH)\d+\x01/g, '\n$&\n');
 
-    // 6. Inline markdown
-    text = text.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>');
-    text = text.replace(/__([^_\n]+)__/g,      '<strong>$1</strong>');
-    text = text.replace(/\*([^*\n]+)\*/g,      '<em>$1</em>');
-    text = text.replace(/_([^_\n]+)_/g,        '<em>$1</em>');
-    text = text.replace(/~~([^~\n]+)~~/g,      '<s>$1</s>');
+    // 6. Headings, lists, quotes, paragraphs → HTML
+    text = renderBlocks(text);
 
-    // 7. Paragraphs (skip lines that are already block elements)
-    text = text.split('\n\n').map((p) => {
-        p = p.trim();
-        if (!p) { return ''; }
-        if (/^<(h[2-4]|ul|ol|li|blockquote|hr|details|div)/.test(p)) { return p; }
-        return `<p>${p.replace(/\n/g, '<br>')}</p>`;
-    }).join('');
+    // 7. Restore think blocks first (their text may hold code placeholders)…
+    // NOTE: function replacers are used everywhere below so "$&", "$$" or "$'" inside code stay literal.
+    thinks.forEach((content, i) => {
+        const inner = escHtml(content).replace(/\n/g, '<br>');
+        text = text.replace(
+            `\x01TH${i}\x01`,
+            () => `<details class="think-block"><summary>Reasoning (click to expand)</summary><div class="think-content">${inner}</div></details>`
+        );
+    });
 
-    // 8. Restore code blocks with optional syntax highlighting
+    // 8. …then code blocks with optional syntax highlighting…
     codeBlocks.forEach(({ lang, code }, i) => {
         let highlighted = escHtml(code);
 
@@ -270,24 +414,15 @@ function renderMarkdown(text) {
             `</div>`;
         text = text.replace(
             `\x01CB${i}\x01`,
-            `<div class="code-block" data-block-idx="${i}">${header}<pre class="hljs">${highlighted}</pre></div>`
+            () => `<div class="code-block" data-block-idx="${i}">${header}<pre class="hljs">${highlighted}</pre></div>`
         );
     });
 
-    // 9. Restore inline codes
+    // 9. …then inline code
     inlines.forEach((code, i) => {
         text = text.replace(
             `\x01IC${i}\x01`,
-            `<code class="inline">${escHtml(code)}</code>`
-        );
-    });
-
-    // 10. Restore think blocks
-    thinks.forEach((content, i) => {
-        const inner = escHtml(content).replace(/\n/g, '<br>');
-        text = text.replace(
-            `\x01TH${i}\x01`,
-            `<details class="think-block"><summary>Reasoning (click to expand)</summary><div class="think-content">${inner}</div></details>`
+            () => `<code class="inline">${escHtml(code)}</code>`
         );
     });
 
@@ -340,6 +475,11 @@ const TOOL_ICONS = {
     list_files:        '📁',
     search_files:      '🔍',
     create_file:       '🆕',
+    create_folder:     '📂',
+    copy_file:         '📋',
+    find_files:        '🔎',
+    system_info:       '🖥️',
+    get_diagnostics:   '🩺',
     edit_file:         '✏️',
     write_file:        '💾',
     append_to_file:    '📝',
