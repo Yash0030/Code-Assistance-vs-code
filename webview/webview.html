@@ -1144,6 +1144,127 @@
     }
     .file-diff-added { color: var(--oa-green); }
     .file-diff-removed { color: var(--oa-red); }
+    #activity-dropdown {
+      flex-shrink: 0;
+      margin: 0 1px 6px;
+      border: 1px solid color-mix(in srgb, var(--oa-violet) 24%, var(--oa-border));
+      border-radius: 10px;
+      background: color-mix(in srgb, var(--oa-violet) 5%, var(--oa-surface));
+      overflow: hidden;
+    }
+    #activity-dropdown summary {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      min-height: 31px;
+      padding: 5px 9px;
+      cursor: pointer;
+      list-style: none;
+      user-select: none;
+    }
+    #activity-dropdown summary::-webkit-details-marker { display: none; }
+    #activity-dropdown summary::before {
+      content: '›';
+      color: var(--oa-violet);
+      font-size: 17px;
+      line-height: 12px;
+      transition: transform 0.15s ease;
+    }
+    #activity-dropdown[open] summary::before { transform: rotate(90deg); }
+    #activity-dropdown summary:hover { background: color-mix(in srgb, var(--oa-violet) 7%, transparent); }
+    .activity-title {
+      color: var(--vscode-sideBar-foreground, #ccc);
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.25px;
+    }
+    #activity-summary {
+      flex: 1;
+      min-width: 0;
+      overflow: hidden;
+      color: var(--vscode-descriptionForeground, #aaa);
+      font-size: 10px;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    #activity-count {
+      flex-shrink: 0;
+      min-width: 18px;
+      padding: 2px 5px;
+      border-radius: 8px;
+      background: color-mix(in srgb, var(--oa-violet) 16%, var(--oa-surface));
+      color: var(--oa-accent);
+      font-family: var(--vscode-editor-font-family, monospace);
+      font-size: 9px;
+      text-align: center;
+    }
+    #agent-progress {
+      padding: 7px 10px 8px;
+      border-top: 1px solid color-mix(in srgb, var(--oa-border) 80%, transparent);
+      background: color-mix(in srgb, var(--oa-cyan) 4%, transparent);
+    }
+    #agent-progress[hidden] { display: none; }
+    .agent-progress-label {
+      display: block;
+      margin-bottom: 3px;
+      color: var(--oa-cyan);
+      font-size: 9px;
+      font-weight: 700;
+      letter-spacing: 0.45px;
+      text-transform: uppercase;
+    }
+    #agent-progress-text {
+      color: var(--vscode-foreground, #ddd);
+      font-size: 11px;
+      line-height: 1.45;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+    #activity-list {
+      max-height: 175px;
+      overflow-y: auto;
+      padding: 2px 9px 7px 12px;
+      border-top: 1px solid color-mix(in srgb, var(--oa-border) 80%, transparent);
+      scrollbar-width: thin;
+    }
+    .activity-step {
+      position: relative;
+      display: flex;
+      align-items: baseline;
+      gap: 7px;
+      padding: 5px 2px 5px 10px;
+      border-left: 1px solid color-mix(in srgb, var(--oa-violet) 35%, transparent);
+      color: var(--vscode-descriptionForeground, #aaa);
+      font-size: 10px;
+      line-height: 1.4;
+    }
+    .activity-step::before {
+      position: absolute;
+      top: 9px;
+      left: -3px;
+      width: 5px;
+      height: 5px;
+      border-radius: 50%;
+      background: var(--oa-violet);
+      content: '';
+    }
+    .activity-step.success::before { background: var(--oa-green); }
+    .activity-step.error::before { background: var(--oa-red); }
+    .activity-step.running::before {
+      background: var(--oa-cyan);
+      box-shadow: 0 0 7px color-mix(in srgb, var(--oa-cyan) 50%, transparent);
+    }
+    .activity-step-text {
+      flex: 1;
+      min-width: 0;
+      overflow-wrap: anywhere;
+    }
+    .activity-step time {
+      flex-shrink: 0;
+      opacity: 0.55;
+      font-size: 9px;
+      font-variant-numeric: tabular-nums;
+    }
 
     #scroll-btn,
     .header-btn,
@@ -1205,6 +1326,18 @@
     <div id="context-bar"></div>
     <!-- @mention autocomplete dropdown -->
     <div id="mention-dropdown" style="display:none"></div>
+    <details id="activity-dropdown">
+      <summary>
+        <span class="activity-title">Agent activity</span>
+        <span id="activity-summary">No activity yet</span>
+        <span id="activity-count">0</span>
+      </summary>
+      <div id="agent-progress" hidden>
+        <span class="agent-progress-label">Current plan / next step</span>
+        <div id="agent-progress-text"></div>
+      </div>
+      <div id="activity-list" role="log" aria-live="polite" aria-label="Agent activity timeline"></div>
+    </details>
     <div id="agent-status" role="status" aria-live="polite">
       <span id="agent-status-dot"></span>
       <span id="agent-status-text"></span>

@@ -15,6 +15,12 @@ const statusDot        = /** @type {HTMLSpanElement}    */ (document.getElementB
 const statusText       = /** @type {HTMLSpanElement}    */ (document.getElementById('status-text'));
 const agentStatus      = /** @type {HTMLDivElement}     */ (document.getElementById('agent-status'));
 const agentStatusText  = /** @type {HTMLSpanElement}    */ (document.getElementById('agent-status-text'));
+const activityDropdown = /** @type {HTMLDetailsElement} */ (document.getElementById('activity-dropdown'));
+const activityList     = /** @type {HTMLDivElement}    */ (document.getElementById('activity-list'));
+const activitySummary  = /** @type {HTMLSpanElement}   */ (document.getElementById('activity-summary'));
+const activityCount    = /** @type {HTMLSpanElement}   */ (document.getElementById('activity-count'));
+const agentProgress    = /** @type {HTMLDivElement}    */ (document.getElementById('agent-progress'));
+const agentProgressText = /** @type {HTMLDivElement}   */ (document.getElementById('agent-progress-text'));
 const scrollBtn        = /** @type {HTMLButtonElement}  */ (document.getElementById('scroll-btn'));
 const contextBar       = /** @type {HTMLDivElement}     */ (document.getElementById('context-bar'));
 const historyBtn       = /** @type {HTMLButtonElement}  */ (document.getElementById('history-btn'));
@@ -32,6 +38,8 @@ let currentMsgEl = null;
 /** @type {string} */
 let currentRaw = '';
 let streaming = false;
+let activitySteps = 0;
+let lastActivityText = '';
 /** True when the user has manually scrolled away from the bottom. */
 let userScrolledUp = false;
 
@@ -902,6 +910,60 @@ function setAgentStatus(text) {
     agentStatus.classList.toggle('visible', Boolean(text));
 }
 
+/**
+ * Add a concise, observable milestone to the activity disclosure.
+ * This intentionally reports actions and statuses, not private model reasoning.
+ * @param {string} text
+ * @param {'running'|'success'|'error'|'info'} [state]
+ */
+function addActivityStep(text, state = 'info') {
+    if (!text || text === lastActivityText) { return; }
+    lastActivityText = text;
+    activitySteps++;
+
+    const row = document.createElement('div');
+    row.className = `activity-step ${state}`;
+    const label = document.createElement('span');
+    label.className = 'activity-step-text';
+    label.textContent = text;
+    const time = document.createElement('time');
+    time.dateTime = new Date().toISOString();
+    time.textContent = getTimeStr();
+    row.append(label, time);
+    activityList.appendChild(row);
+
+    while (activityList.childElementCount > 80) {
+        activityList.firstElementChild?.remove();
+    }
+    activitySummary.textContent = text;
+    activityCount.textContent = String(activitySteps);
+    if (activityDropdown.open) {
+        activityList.scrollTop = activityList.scrollHeight;
+    }
+}
+
+function resetActivity() {
+    activityList.replaceChildren();
+    activitySteps = 0;
+    lastActivityText = '';
+    activitySummary.textContent = 'No activity yet';
+    activityCount.textContent = '0';
+    agentProgressText.textContent = '';
+    agentProgress.hidden = true;
+}
+
+/** @param {string} text */
+function setAgentProgress(text) {
+    const progress = text.trim().slice(0, 240);
+    if (!progress) { return; }
+    agentProgressText.textContent = progress;
+    agentProgress.hidden = false;
+    activitySummary.textContent = progress;
+    if (activityDropdown.open) {
+        activityList.scrollTop = activityList.scrollHeight;
+    }
+}
+
 function sendMessage() {
     const text = promptEl.value.trim();
     if (!text || streaming) { return; }
@@ -1084,22 +1146,32 @@ window.addEventListener('message', (event) => {
             break;
 
         case 'agentStart':
+            resetActivity();
+            addActivityStep('Request started', 'running');
             setAgentStatus('Thinking through your request…');
             setStreaming(true);
             break;
 
         case 'agentEnd':
+            addActivityStep('Run ended');
             setAgentStatus('');
             setStreaming(false);
             break;
 
         case 'agentActivity':
             setAgentStatus(msg.text ?? 'Working…');
+            addActivityStep(msg.text ?? 'Working…', 'running');
             break;
 
         case 'streamStart':
             setAgentStatus('Planning the next step…');
+            addActivityStep('Planning the next action…', 'running');
+            setAgentProgress('Waiting for the model to choose its next action…');
             startAssistantMessage();
+            break;
+
+        case 'agentProgress':
+            setAgentProgress(String(msg.text ?? ''));
             break;
 
         case 'token':
@@ -1114,20 +1186,27 @@ window.addEventListener('message', (event) => {
             break;
 
         case 'toolCall':
+            addActivityStep(`Running tool: ${String(msg.name).replace(/_/g, ' ')}`, 'running');
             addToolCard(msg.id, msg.name, msg.args);
             break;
 
         case 'toolResult':
+            addActivityStep(
+                `${msg.success ? 'Completed' : 'Failed'} tool: ${String(msg.name).replace(/_/g, ' ')}`,
+                msg.success ? 'success' : 'error'
+            );
             updateToolCard(msg.id, msg.success, msg.preview ?? '');
             break;
 
         case 'error':
+            addActivityStep(`Error: ${String(msg.text ?? 'Agent error').slice(0, 180)}`, 'error');
             addErrorMessage(msg.text);
             setStreaming(false);
             break;
 
         case 'clearChat':
             clearChat();
+            resetActivity();
             break;
 
         case 'removeLastAssistant':
@@ -1136,6 +1215,7 @@ window.addEventListener('message', (event) => {
 
         case 'commandStart':
             setAgentStatus(msg.cmd ? `Running: ${msg.cmd}` : 'Running command…');
+            addActivityStep(`Running command: ${String(msg.cmd ?? '').slice(0, 120)}`, 'running');
             addCommandBlock(msg.id, msg.cmd);
             break;
 
@@ -1145,14 +1225,20 @@ window.addEventListener('message', (event) => {
 
         case 'commandEnd':
             finalizeCommandBlock(msg.id, msg.exitCode);
+            addActivityStep(`Command finished with exit code ${msg.exitCode}`, msg.exitCode === 0 ? 'success' : 'error');
             setAgentStatus('Thinking about the command result…');
             break;
 
         case 'fileChanged':
+            addActivityStep(
+                `File ${msg.action}: ${msg.path}${Number(msg.added) || Number(msg.removed) ? ` (+${Number(msg.added) || 0} −${Number(msg.removed) || 0})` : ''}`,
+                msg.action === 'deleted' ? 'error' : 'success'
+            );
             addFileToast(msg.path, msg.action, msg.added, msg.removed);
             break;
 
         case 'modeSwitch':
+            addActivityStep(`Switched to text-mode tool calling for ${msg.model}`);
             addModeNotice(msg.model);
             break;
 

@@ -2,7 +2,7 @@ import * as http from 'http';
 import * as https from 'https';
 import * as vscode from 'vscode';
 import { getConfig, parseBaseUrl } from './config';
-import { logInfo, logError } from './logger';
+import { logInfo, logWarn, logError } from './logger';
 
 // ── Shared types ──────────────────────────────────────────────────────────────
 
@@ -29,6 +29,8 @@ interface ChatChunk {
     done?: boolean;
     error?: string;
 }
+
+const CHAT_IDLE_TIMEOUT_MS = 5 * 60 * 1000;
 
 // ── Endpoint helpers ──────────────────────────────────────────────────────────
 
@@ -95,9 +97,15 @@ export function streamChatRequest(
     onToken: (t: string) => void,
     stopRef: { stop: boolean },
     stopWhenToolReady?: (content: string, toolCalls: OllamaToolCall[]) => boolean,
-    format?: unknown
+    format?: unknown,
+    onProgress?: (elapsedSeconds: number, receivedChars: number) => void,
+    traceId = 'untracked'
 ): Promise<StreamResult> {
     return new Promise((resolve, reject) => {
+        const requestStartedAt = Date.now();
+        const requestId = `${traceId}/ollama-${requestStartedAt.toString(36)}`;
+        const elapsed = (): string => `${((Date.now() - requestStartedAt) / 1000).toFixed(1)}s`;
+        const trace = (message: string): void => logInfo(`[request ${requestId} +${elapsed()}] ${message}`);
         const { hostname, port } = getEndpoint();
         const cfg = getConfig();
         const numCtx = getNumCtx();
@@ -116,20 +124,46 @@ export function streamChatRequest(
         if (format) { payload.format = format; }
 
         const body = JSON.stringify(payload);
-        logInfo(`POST /api/chat  model=${model}  msgs=${messages.length}  num_ctx=${numCtx}`);
+        trace(
+            `Preparing POST /api/chat — model=${model}, messages=${messages.length}, ` +
+            `num_ctx=${numCtx}, tools=${tools.length}, format=${format ? 'structured' : 'none'}, ` +
+            `body=${Buffer.byteLength(body)} bytes, endpoint=${hostname}:${port}`
+        );
 
         let fullContent = '';
         const toolCalls: OllamaToolCall[] = [];
         let settled = false;
+        let bytesReceived = 0;
+        let parsedLines = 0;
+        let malformedLines = 0;
+        let lastProgressBytes = 0;
+        let partialLineChars = 0;
+        let heartbeat: NodeJS.Timeout | undefined;
+        const clearHeartbeat = (): void => {
+            if (heartbeat) {
+                clearInterval(heartbeat);
+                heartbeat = undefined;
+            }
+        };
 
         const succeed = () => {
             if (settled) { return; }
             settled = true;
+            clearHeartbeat();
+            trace(
+                `Request resolved — response_bytes=${bytesReceived}, ndjson_lines=${parsedLines}, ` +
+                `malformed_lines=${malformedLines}, content_chars=${fullContent.length}, tool_calls=${toolCalls.length}`
+            );
             resolve({ content: fullContent, toolCalls });
         };
         const fail = (err: Error) => {
             if (settled) { return; }
             settled = true;
+            clearHeartbeat();
+            logError(
+                `[request ${requestId} +${elapsed()}] Request rejected — ${err.name}: ${err.message}; ` +
+                `response_bytes=${bytesReceived}, ndjson_lines=${parsedLines}, content_chars=${fullContent.length}`
+            );
             reject(err);
         };
 
@@ -142,6 +176,7 @@ export function streamChatRequest(
                 },
             },
             (res) => {
+                trace(`HTTP response received — status=${res.statusCode ?? 0}, content-type=${res.headers['content-type'] ?? '(none)'}`);
                 if (res.statusCode !== 200) {
                     let e = '';
                     res.on('data', (c: Buffer) => (e += c.toString()));
@@ -157,11 +192,19 @@ export function streamChatRequest(
                 }
 
                 let buf = '';
+                trace('Streaming response accepted — waiting for NDJSON chunks');
 
                 const handleLine = (line: string): void => {
                     if (!line.trim()) { return; }
                     let p: ChatChunk;
-                    try { p = JSON.parse(line) as ChatChunk; } catch { return; /* skip malformed line */ }
+                    try {
+                        p = JSON.parse(line) as ChatChunk;
+                    } catch {
+                        malformedLines++;
+                        logWarn(`[request ${requestId} +${elapsed()}] Ignoring malformed NDJSON line (${line.length} chars)`);
+                        return;
+                    }
+                    parsedLines++;
 
                     // Ollama can report errors inside a 200 stream (e.g. out of memory while loading)
                     if (p.error) {
@@ -176,15 +219,16 @@ export function streamChatRequest(
                     if (p.message?.tool_calls?.length) {
                         // Append (don't overwrite): some models stream one call per chunk
                         toolCalls.push(...p.message.tool_calls);
+                        trace(`Tool-call chunk received — total tool_calls=${toolCalls.length}`);
                     }
                     if (!p.done && stopWhenToolReady?.(fullContent, toolCalls)) {
-                        logInfo(`Stopping model stream early — ${toolCalls.length ? 'native tool call ready' : 'text tool call ready'}`);
+                        trace(`Stopping stream early — ${toolCalls.length ? 'native tool call ready' : 'text tool call ready'}`);
                         succeed();
                         req.destroy();
                         return;
                     }
                     if (p.done) {
-                        logInfo(`Stream done — ${fullContent.length} chars, ${toolCalls.length} tool calls`);
+                        trace(`Ollama marked stream done — content_chars=${fullContent.length}, tool_calls=${toolCalls.length}`);
                         succeed();
                     }
                 };
@@ -196,26 +240,60 @@ export function streamChatRequest(
                         req.destroy();
                         return;
                     }
+                    bytesReceived += chunk.length;
                     buf += chunk.toString();
                     const lines = buf.split('\n');
                     buf = lines.pop() ?? '';
+                    partialLineChars = buf.length;
                     for (const line of lines) { handleLine(line); }
                 });
 
                 res.on('end', () => {
+                    trace(`Response stream ended — remaining_buffer=${buf.length} chars`);
                     handleLine(buf); // last line without trailing newline
                     succeed();
                 });
                 res.on('error', (err) => {
+                    logError(`[request ${requestId} +${elapsed()}] Response stream error — ${err.message}`);
                     if (stopRef.stop) { succeed(); } else { fail(err); }
                 });
             }
         );
+        req.on('socket', (socket) => {
+            if (socket.connecting) {
+                trace('Socket assigned — connecting to Ollama');
+                socket.once('connect', () => trace('TCP connection established'));
+            } else {
+                trace('Reusing established Ollama socket');
+            }
+        });
+        req.on('finish', () => trace('HTTP request body sent'));
+        req.on('close', () => {
+            if (!settled) {
+                trace(`HTTP request closed before completion — response_bytes=${bytesReceived}`);
+            }
+        });
+        req.setTimeout(CHAT_IDLE_TIMEOUT_MS, () => {
+            const error = new Error(`No response from Ollama for ${Math.round(CHAT_IDLE_TIMEOUT_MS / 1000)} seconds.`);
+            fail(error);
+            req.destroy();
+        });
+        heartbeat = setInterval(() => {
+            const elapsedSeconds = Math.floor((Date.now() - requestStartedAt) / 1000);
+            const newBytes = bytesReceived - lastProgressBytes;
+            lastProgressBytes = bytesReceived;
+            trace(
+                `Still waiting — received_bytes=${bytesReceived} (+${newBytes}), ` +
+                `ndjson_lines=${parsedLines}, partial_line_chars=${partialLineChars}, ` +
+                `content_chars=${fullContent.length}, tool_calls=${toolCalls.length}`
+            );
+            onProgress?.(elapsedSeconds, fullContent.length);
+        }, 15_000);
         req.on('error', (err) => {
             if (stopRef.stop) { succeed(); return; }
-            logError(`streamChatRequest: ${err.message}`);
             fail(err);
         });
+        trace('Sending HTTP request');
         req.write(body);
         req.end();
     });

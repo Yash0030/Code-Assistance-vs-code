@@ -341,41 +341,7 @@ const IMPLEMENTATION_TOOL_NAMES = new Set([
     'rename_file', 'copy_file', 'delete_file', 'run_command',
 ]);
 
-const IMPLEMENTATION_ACTION_FORMAT = {
-    type: 'object',
-    properties: {
-        action: { type: 'string', enum: ['tool', 'final'] },
-        name: { type: 'string', enum: [...TOOL_NAMES] },
-        arguments: { type: 'object' },
-        response: { type: 'string' },
-    },
-    required: ['action', 'name', 'arguments', 'response'],
-    additionalProperties: false,
-};
-
-const IMPLEMENTATION_TOOL_CATALOG = TOOL_DEFINITIONS.map((definition) => {
-    const fn = definition.function;
-    return `${fn.name}: ${fn.description} Arguments: ${JSON.stringify(fn.parameters)}`;
-}).join('\n');
-
-function parseImplementationAction(content: string): {
-    toolCall?: OllamaToolCall;
-    response?: string;
-} {
-    try {
-        const parsed = JSON.parse(content) as Record<string, unknown>;
-        if (parsed.action === 'tool') {
-            const toolCall = toToolCall({ name: parsed.name, arguments: parsed.arguments });
-            return toolCall ? { toolCall } : {};
-        }
-        if (parsed.action === 'final' && typeof parsed.response === 'string') {
-            return { response: parsed.response };
-        }
-    } catch {
-        return {};
-    }
-    return {};
-}
+const IMPLEMENTATION_TOOL_PROMPT = `\n\nIMPLEMENTATION REQUEST:\nYour first response must be a tool call, not a plan or narration. Inspect only what is needed, then make the requested changes immediately with file tools. Avoid redundant reads and repeated self-review. Run a focused check after editing. Continue with tools until the requested work is done; report only verified results or a concrete blocker.`;
 
 function asArgs(value: unknown): Record<string, unknown> | undefined {
     if (typeof value === 'string') {
@@ -519,6 +485,16 @@ function isRealUserMessage(m: OllamaMessage): boolean {
     return m.role === 'user' && !String(m.content ?? '').startsWith('[TOOL RESULT:');
 }
 
+function summarizeToolArgs(args: Record<string, unknown>): string {
+    const safeArgs = Object.fromEntries(Object.entries(args).map(([key, value]) => {
+        if (['content', 'old_string', 'new_string'].includes(key)) {
+            return [key, `[redacted: ${String(value ?? '').length} chars]`];
+        }
+        return [key, value];
+    }));
+    return JSON.stringify(safeArgs).slice(0, 500);
+}
+
 // ── Agent ─────────────────────────────────────────────────────────────────────
 
 export type PostFn = (msg: object) => void;
@@ -607,6 +583,12 @@ export class Agent {
     }
 
     private async runLoop(userMessage: string, model: string, post: PostFn): Promise<void> {
+        const runStartedAt = Date.now();
+        const runId = `${runStartedAt.toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+        const timeline = (event: string): void => {
+            const elapsed = ((Date.now() - runStartedAt) / 1000).toFixed(1);
+            logInfo(`[timeline ${runId} +${elapsed}s] ${event}`);
+        };
         this.stopRef = { stop: false };
         this.postFn  = post;
         if (this.currentModel !== model) {
@@ -615,6 +597,7 @@ export class Agent {
         }
         this.history.push({ role: 'user', content: userMessage });
         logInfo(`Agent run — model: ${model}, mode: ${this.toolMode}, history: ${this.history.length}`);
+        timeline(`Run started — model=${model}, workspace=${this.workspaceRoot || '(none)'}`);
 
         const cfg = getConfig();
         const customSystemPrompt = cfg.systemPrompt.trim();
@@ -626,6 +609,7 @@ export class Agent {
         const isAffirmativeContinuation = /^(yes|yeah|yep|go ahead|continue|proceed|do it|okay|ok)[.!\s]*$/i.test(latestUserRequest);
         const isImplementationRequest = /\b(create|build|implement|write|modify|update|fix|refactor|develop|add|generate|make|continue|run|test)\b/i.test(latestUserRequest)
             || isAffirmativeContinuation;
+        timeline(`Request classified — implementation=${isImplementationRequest}`);
         let hasTakenImplementationAction = false;
 
         const callCounts = new Map<string, number>();
@@ -633,17 +617,19 @@ export class Agent {
         let noToolImplementationRetries = 0;
 
         for (let turn = 0; turn < MAX_TURNS; turn++) {
-            if (this.stopRef.stop) { break; }
+            if (this.stopRef.stop) {
+                timeline(`Run stopped by user before turn ${turn + 1}`);
+                break;
+            }
 
             const isTextMode = this.toolMode === 'text';
+            const modelStartedAt = Date.now();
+            timeline(`Turn ${turn + 1}/${MAX_TURNS} — requesting next model action (mode=${this.toolMode})`);
             const systemContent = baseSystemContent + '\n\n' + this.buildEnvironment()
                 + '\n\n' + workspaceContext
-                + (isImplementationRequest
-                    ? `\n\nIMPLEMENTATION ACTION MODE:\nReturn exactly one JSON object matching the required schema. Do not write a plan. Choose action "tool" to request the single next tool call needed; use the exact registered tool name and arguments, preferring workspace inspection or an edit/create/write action. Choose action "final" only for a concise final answer after the requested work is complete or if you need to state a genuine blocker. Never describe future actions as if they were done.\nAvailable tool names, descriptions, and argument schemas:\n${IMPLEMENTATION_TOOL_CATALOG}`
-                    : '')
+                + (isImplementationRequest ? IMPLEMENTATION_TOOL_PROMPT : '')
                 + (isTextMode ? TEXT_MODE_TOOL_INSTRUCTIONS : '');
-            const structuredActions = isImplementationRequest;
-            const tools = isTextMode || structuredActions ? [] : TOOL_DEFINITIONS;
+            const tools = isTextMode ? [] : TOOL_DEFINITIONS;
 
             this.trimHistory();
             post({ type: 'streamStart' });
@@ -654,18 +640,31 @@ export class Agent {
                     model,
                     [{ role: 'system', content: systemContent }, ...this.history],
                     tools,
-                    () => post({ type: 'agentActivity', text: 'Working through the request…' }),
+                    (chunk) => {
+                        if (!isImplementationRequest) { post({ type: 'token', text: chunk }); }
+                    },
                     this.stopRef,
                     (content, nativeCalls) => nativeCalls.length > 0
-                        || (structuredActions && !!parseImplementationAction(content).toolCall)
                         || parseTextToolCalls(content).length > 0
-                        || (!structuredActions && parseJsonToolCall(stripToolBlocks(content)).calls.length > 0),
-                    structuredActions ? IMPLEMENTATION_ACTION_FORMAT : undefined
+                        || parseJsonToolCall(stripToolBlocks(content)).calls.length > 0,
+                    undefined,
+                    (elapsedSeconds, receivedChars) => {
+                        timeline(
+                            `Ollama still generating turn ${turn + 1} — ` +
+                            `${elapsedSeconds}s elapsed, ${receivedChars} response chars received`
+                        );
+                        post({
+                            type: 'agentActivity',
+                            text: `Waiting for model response… ${elapsedSeconds}s`,
+                        });
+                    },
+                    `${runId}/turn-${turn + 1}`
                 );
             } catch (err) {
                 if (err instanceof ToolsNotSupportedError && this.toolMode === 'native') {
                     this.toolMode = 'text';
                     logInfo(`Model ${model} → switching to text-mode tool calling`);
+                    timeline(`Turn ${turn + 1} — native tool calling unsupported; retrying in text mode`);
                     post({ type: 'streamEnd' });
                     post({ type: 'removeLastAssistant' });
                     post({ type: 'modeSwitch', mode: 'text', model });
@@ -674,6 +673,7 @@ export class Agent {
                 }
                 const msg = (err as Error).message;
                 logError(`Agent stream error (turn ${turn}): ${msg}`);
+                timeline(`Turn ${turn + 1} — model request failed after ${((Date.now() - modelStartedAt) / 1000).toFixed(1)}s: ${msg}`);
                 post({ type: 'streamEnd' });
                 post({ type: 'error', text: this.friendlyError(msg) });
                 finished = true;
@@ -683,6 +683,7 @@ export class Agent {
             // A stopped stream can still resolve with partial content. Never execute
             // tool calls parsed from that incomplete response.
             if (this.stopRef.stop) {
+                timeline(`Turn ${turn + 1} — response discarded because generation was stopped`);
                 post({ type: 'streamEnd' });
                 this.replaceLastBubble('');
                 finished = true;
@@ -692,19 +693,7 @@ export class Agent {
             // ── Extract tool calls depending on mode ──────────────────────────
             let toolCalls: OllamaToolCall[];
 
-            if (structuredActions) {
-                const action = parseImplementationAction(result.content);
-                if (action.toolCall) {
-                    toolCalls = [action.toolCall];
-                } else if (action.response !== undefined) {
-                    result.content = action.response;
-                    toolCalls = [];
-                } else {
-                    toolCalls = [];
-                    result.content = '';
-                    logError('Implementation action response did not match the required action schema.');
-                }
-            } else if (isTextMode) {
+            if (isTextMode) {
                 const textToolCalls = parseTextToolCalls(result.content);
                 const withoutToolBlocks = stripToolBlocks(result.content);
                 const parsedJson = parseJsonToolCall(withoutToolBlocks);
@@ -724,6 +713,7 @@ export class Agent {
                     }
                 }
             }
+            timeline(`Turn ${turn + 1} — model response received after ${((Date.now() - modelStartedAt) / 1000).toFixed(1)}s; tool calls=${toolCalls.length}`);
 
             // Keep intermediate narration and serialized tool requests out of the chat.
             if (toolCalls.length) {
@@ -732,7 +722,7 @@ export class Agent {
             }
 
             const assistantContent = toolCalls.length
-                ? (isTextMode || structuredActions
+                ? (isTextMode
                     ? toolCalls.map((call) => `<tool>${JSON.stringify({
                         name: call.function.name,
                         arguments: call.function.arguments,
@@ -750,6 +740,7 @@ export class Agent {
                 if (isImplementationRequest && !hasTakenImplementationAction && noToolImplementationRetries < 3 && !this.stopRef.stop) {
                     noToolImplementationRetries++;
                     logInfo(`Implementation response had no tool calls; requesting tool-based execution (${noToolImplementationRetries}/3)`);
+                    timeline(`Turn ${turn + 1} — no implementation tool action; retry ${noToolImplementationRetries}/3`);
                     post({ type: 'streamEnd' });
                     this.replaceLastBubble('');
                     post({ type: 'agentActivity', text: 'No tool action was returned. Retrying with an explicit workspace-tool request…' });
@@ -761,6 +752,7 @@ export class Agent {
                 }
 
                 if (isImplementationRequest && !hasTakenImplementationAction) {
+                    timeline(`Turn ${turn + 1} — stopped: no implementation tool action succeeded`);
                     post({ type: 'streamEnd' });
                     this.replaceLastBubble('');
                     const text = 'I could not get this model to execute workspace tools after several attempts. No implementation was applied. Try a tool-capable coding model, such as qwen2.5-coder, and send the request again.';
@@ -774,6 +766,7 @@ export class Agent {
                     post({ type: 'error', text: 'The model returned an empty response. Try again, or use a larger model.' });
                 }
                 this.history.push(assistantMessage);
+                timeline(`Run completed with assistant response`);
                 post({ type: 'token', text: result.content });
                 post({ type: 'streamEnd' });
                 finished = true;
@@ -801,7 +794,10 @@ export class Agent {
                 } catch { args = {}; }
 
                 const toolId = `t_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
-                logInfo(`Tool [${this.toolMode}]: ${name}  args=${JSON.stringify(args).slice(0, 500)}`);
+                const toolStartedAt = Date.now();
+                const argsSummary = summarizeToolArgs(args);
+                logInfo(`Tool [${this.toolMode}]: ${name}  args=${argsSummary}`);
+                timeline(`Tool started — ${name}(${argsSummary})`);
                 post({ type: 'toolCall', id: toolId, name, args });
 
                 // Guard against the model looping on the same call.
@@ -814,27 +810,40 @@ export class Agent {
                 if (count > 3) {
                     ok = false;
                     toolResult = `Error: you already made this exact call ${count - 1} times. Stop repeating it — try a different approach or explain the problem to the user.`;
+                    timeline(`Tool rejected — repeated identical call (${count - 1} prior attempts)`);
                 } else {
                     try {
                         toolResult = await this.executeTool(name, args, toolId);
                         logInfo(`Tool ${name} OK — ${toolResult.length} chars`);
+                        timeline(`Tool succeeded — ${name} in ${((Date.now() - toolStartedAt) / 1000).toFixed(1)}s`);
                     } catch (err) {
                         ok = false;
                         toolResult = `Error: ${(err as Error).message}`;
                         logError(`Tool ${name} failed: ${toolResult}`);
+                        timeline(`Tool failed — ${name} in ${((Date.now() - toolStartedAt) / 1000).toFixed(1)}s: ${(err as Error).message}`);
                     }
                 }
                 post({ type: 'toolResult', id: toolId, name, success: ok, preview: toolResult.slice(0, 400) });
-                this.pushToolResult(isTextMode || structuredActions, name, toolResult);
+                this.pushToolResult(isTextMode, name, toolResult);
+                if (count > 3) {
+                    const text = `Stopped because the agent repeated the same tool call too many times: ${name}. No further action was taken.`;
+                    timeline(`Run halted — repeated tool-call limit reached for ${name}`);
+                    post({ type: 'error', text });
+                    finished = true;
+                    break;
+                }
                 if (ok && IMPLEMENTATION_TOOL_NAMES.has(name)) {
                     hasTakenImplementationAction = true;
                 }
             }
+            if (finished) { break; }
         }
 
         if (!finished && !this.stopRef.stop) {
+            timeline(`Run reached the ${MAX_TURNS}-turn limit`);
             post({ type: 'error', text: `Stopped after ${MAX_TURNS} steps. Send "continue" to keep going.` });
         }
+        timeline(`Run ended — ${this.stopRef.stop ? 'stopped' : finished ? 'finished' : 'ended'}; elapsed=${((Date.now() - runStartedAt) / 1000).toFixed(1)}s`);
     }
 
     // ── History helpers ───────────────────────────────────────────────────────

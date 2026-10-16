@@ -181,6 +181,7 @@ That's it. The agent will start responding immediately.
 - **Diff preview** before applying file edits
 - **Confirmation dialogs** for all destructive actions (write, delete, run command)
 - **Automatic tool-mode fallback** — works with models that don't support native tool calling
+- Implementation requests use native tool calls when supported, avoiding a custom JSON action wrapper; unsupported models use the text-mode fallback
 - **Project memory tools** — the AI can save and recall notes about your project
 
 ### 📎 @File Mentions
